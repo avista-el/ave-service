@@ -6,16 +6,16 @@ WORKDIR /app
 # Copy manifests first — Docker layer cache only invalidates here on dep changes
 COPY package*.json ./
 
-# Install all deps (including devDeps needed for nest build)
-RUN npm ci --ignore-scripts
+# Install all deps including devDeps needed for `nest build`
+RUN npm ci
 
 COPY . .
 
 # Compile TypeScript → dist/
 RUN npm run build
 
-# Prune to production deps only (shrinks the final image)
-RUN npm ci --omit=dev --ignore-scripts
+# Prune to production deps only to shrink the final image
+RUN npm ci --omit=dev
 
 # ─── Stage 2: runtime ──────────────────────────────────────────────────────────
 FROM node:20-alpine AS runtime
@@ -41,7 +41,7 @@ EXPOSE 3001
 
 ENV NODE_ENV=production
 
-# Render / Docker health probe — waits 20 s for the app to warm up
+# Render / Docker health probe
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD wget -qO- http://localhost:3001/health || exit 1
 
