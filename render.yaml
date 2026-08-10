@@ -1,0 +1,101 @@
+# Render Blueprint — https://render.com/docs/blueprint-spec
+# Deploy: connect this repo to Render → select "Blueprint" → point to this file.
+# All `sync: false` values must be set manually in the Render dashboard under
+# Environment → Secret Files / Environment Variables.
+
+services:
+  # ─── NestJS API (Web Service) ───────────────────────────────────────────────
+  - type: web
+    name: alphavista-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    region: frankfurt # Closest Render region to Nigeria / West Africa
+    plan: starter # Upgrade to standard when you need >512 MB RAM or zero cold-starts
+    numInstances: 1
+    healthCheckPath: /health
+
+    # Build and deploy settings
+    autoDeploy: true # Redeploy on every push to the connected branch
+
+    envVars:
+      # ── Runtime ────────────────────────────────────────────────────────────
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: 3001
+      - key: SWAGGER_ENABLED
+        value: "true" # Set to 'false' to hide /docs on production
+
+      # ── Storefront / CORS ──────────────────────────────────────────────────
+      - key: CLIENT_ORIGIN
+        sync: false # e.g. https://alphavista.ng
+      - key: STOREFRONT_URL
+        sync: false # e.g. https://alphavista.ng
+
+      # ── MongoDB Atlas ──────────────────────────────────────────────────────
+      # URI format: mongodb+srv://user:pass@cluster.mongodb.net/alphavista?...
+      # URL-encode special chars in password: # → %23, @ → %40, etc.
+      - key: MONGODB_URI
+        sync: false
+
+      # ── Redis ──────────────────────────────────────────────────────────────
+      # Use Render Redis add-on (free tier available) or Upstash
+      # Set REDIS_URL to the full rediss:// connection string
+      - key: REDIS_URL
+        sync: false
+
+      # ── JWT ────────────────────────────────────────────────────────────────
+      - key: JWT_SECRET
+        generateValue: true # Render generates a random value on first deploy
+      - key: JWT_REFRESH_SECRET
+        generateValue: true
+      - key: JWT_EXPIRES_IN
+        value: 15m
+      - key: JWT_REFRESH_EXPIRES_IN
+        value: 7d
+
+      # ── Cloudinary ─────────────────────────────────────────────────────────
+      - key: CLOUDINARY_CLOUD_NAME
+        sync: false
+      - key: CLOUDINARY_API_KEY
+        sync: false
+      - key: CLOUDINARY_API_SECRET
+        sync: false
+
+      # ── Paystack ───────────────────────────────────────────────────────────
+      - key: PAYSTACK_SECRET_KEY
+        sync: false
+      - key: PAYSTACK_WEBHOOK_SECRET
+        sync: false
+
+      # ── Flutterwave ────────────────────────────────────────────────────────
+      - key: FLUTTERWAVE_SECRET_KEY
+        sync: false
+      - key: FLUTTERWAVE_ENCRYPTION_KEY
+        sync: false
+
+      # ── Meilisearch ────────────────────────────────────────────────────────
+      # Point to your Meilisearch Cloud URL or a self-hosted Render service
+      - key: MEILISEARCH_HOST
+        sync: false
+      - key: MEILISEARCH_API_KEY
+        sync: false
+
+      # ── Resend ─────────────────────────────────────────────────────────────
+      - key: RESEND_API_KEY
+        sync: false
+      - key: RESEND_FROM_EMAIL
+        value: orders@mail.alphavista.ng
+
+      # ── Geolocation ────────────────────────────────────────────────────────
+      - key: GEO_PROVIDER
+        value: ipapi
+      - key: IPAPI_TOKEN
+        sync: false
+
+      # ── Google OAuth (Sheets sync) ─────────────────────────────────────────
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false

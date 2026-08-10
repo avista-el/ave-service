@@ -1,0 +1,95 @@
+version: '3.9'
+
+# ─── Local development stack ──────────────────────────────────────────────────
+# Starts MongoDB, Redis, Meilisearch alongside the NestJS API.
+# Run: docker compose up -d
+# API will be available at http://localhost:3001
+
+services:
+
+  # ─── NestJS API ─────────────────────────────────────────────────────────────
+  api:
+    build:
+      context: .
+      target: runtime
+    container_name: alphavista_api
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      MONGODB_URI: mongodb://mongo:27017/alphavista
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      MEILISEARCH_HOST: http://meilisearch:7700
+    ports:
+      - '3001:3001'
+    depends_on:
+      mongo:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      meilisearch:
+        condition: service_started
+    networks:
+      - alphavista
+
+  # ─── MongoDB ─────────────────────────────────────────────────────────────────
+  mongo:
+    image: mongo:7
+    container_name: alphavista_mongo
+    restart: unless-stopped
+    # Replica set required for multi-document transactions
+    command: ['--replSet', 'rs0', '--bind_ip_all']
+    ports:
+      - '27017:27017'
+    volumes:
+      - mongo_data:/data/db
+      - ./scripts/mongo-init.js:/docker-entrypoint-initdb.d/mongo-init.js:ro
+    healthcheck:
+      test: ['CMD', 'mongosh', '--eval', "db.adminCommand('ping')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    networks:
+      - alphavista
+
+  # ─── Redis (BullMQ) ──────────────────────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: alphavista_redis
+    restart: unless-stopped
+    ports:
+      - '6379:6379'
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ['CMD', 'redis-cli', 'ping']
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - alphavista
+
+  # ─── Meilisearch ─────────────────────────────────────────────────────────────
+  meilisearch:
+    image: getmeili/meilisearch:v1.10
+    container_name: alphavista_meilisearch
+    restart: unless-stopped
+    environment:
+      MEILI_MASTER_KEY: ${MEILISEARCH_API_KEY:-devmasterkey}
+      MEILI_ENV: development
+    ports:
+      - '7700:7700'
+    volumes:
+      - meili_data:/meili_data
+    networks:
+      - alphavista
+
+volumes:
+  mongo_data:
+  redis_data:
+  meili_data:
+
+networks:
+  alphavista:
+    driver: bridge
