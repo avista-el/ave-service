@@ -70,6 +70,7 @@ async function bootstrap() {
   const swaggerEnabled =
     nodeEnv !== "production" || config.get<string>("SWAGGER_ENABLED", "false") === "true";
 
+  console.log(`\n Swagger enabled ${config.get<string>("SWAGGER_ENABLED", "false") === "true"}`)
   if (swaggerEnabled) {
     const swaggerConfig = new DocumentBuilder()
       .setTitle("Alphavista Electronics API")
