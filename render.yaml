@@ -23,7 +23,7 @@ services:
       - key: NODE_ENV
         value: production
       - key: PORT
-        value: 3001
+        value: 4000
       - key: SWAGGER_ENABLED
         value: "true" # Set to 'false' to hide /docs on production
 

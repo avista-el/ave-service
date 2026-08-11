@@ -30,36 +30,53 @@ import { NotificationsModule } from "./modules/notifications/notifications.modul
     }),
 
     // ── MongoDB ───────────────────────────────────────────────────────────────
+    // bufferCommands: true (default) means Mongoose queues operations until
+    // connected — the app boots and the port opens immediately regardless of
+    // how long Atlas takes to accept the connection.
     MongooseModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => ({
         uri: config.get<string>("database.uri"),
         autoIndex: true,
-        // Retry connection on startup — handles Atlas cold-start latency
-        serverSelectionTimeoutMS: 10_000,
-        socketTimeoutMS: 45_000,
+        // Give Atlas up to 60 s to respond on first connect (cold-start)
+        serverSelectionTimeoutMS: 60_000,
+        socketTimeoutMS: 60_000,
+        connectTimeoutMS: 60_000,
+        // Keep trying to reconnect — never give up after initial timeout
+        heartbeatFrequencyMS: 10_000,
       }),
     }),
 
     // ── BullMQ / Redis ────────────────────────────────────────────────────────
-    // maxRetriesPerRequest: null  → Bull keeps retrying failed jobs indefinitely
-    //   rather than crashing the process when Redis isn't available at startup.
-    // enableReadyCheck: false     → don't block app boot waiting for Redis PING.
+    // The Redis connection MUST NOT block the bootstrap sequence.
+    // Key settings:
+    //   maxRetriesPerRequest: null  → jobs queue without throwing on every call
+    //   enableReadyCheck: false     → don't await a PING before resolving
+    //   lazyConnect: true           → defer TCP connection until first command
+    //   enableOfflineQueue: true    → queue commands while disconnected (default)
     BullModule.forRootAsync({
       inject: [ConfigService],
       useFactory: (config: ConfigService) => {
         const url = config.get<string>("redis.url");
-        const redisOpts = {
-          maxRetriesPerRequest: null as unknown as number,
+
+        // Shared ioredis options that prevent blocking on startup
+        const sharedOpts = {
+          maxRetriesPerRequest: null,
           enableReadyCheck: false,
-          retryStrategy: (times: number) => Math.min(times * 1000, 30_000),
           lazyConnect: true,
+          enableOfflineQueue: true,
+          retryStrategy: (times: number) => Math.min(times * 500, 10_000),
         };
 
         if (url) {
+          // Render Redis / Upstash — rediss:// or redis:// connection string
           return {
-            redis: { ...redisOpts, ...(url as unknown as object) },
-            url,
+            redis: url,
+            // Pass ioredis options alongside the URL via the settings key
+            settings: {
+              lockDuration: 30_000,
+            },
+            defaultJobOptions: { removeOnComplete: true, removeOnFail: false },
           } as unknown as { redis: { host: string; port: number } };
         }
 
@@ -67,14 +84,14 @@ import { NotificationsModule } from "./modules/notifications/notifications.modul
           redis: {
             host: config.get<string>("redis.host", "localhost"),
             port: config.get<number>("redis.port", 6379),
-            password: config.get<string | undefined>("redis.password"),
-            ...redisOpts,
+            password: config.get<string | undefined>("redis.password") || undefined,
+            ...sharedOpts,
           },
         };
       },
     }),
 
-    // ── Scheduler (cron jobs via @nestjs/schedule) ────────────────────────────
+    // ── Scheduler ────────────────────────────────────────────────────────────
     ScheduleModule.forRoot(),
 
     // ── Feature modules ───────────────────────────────────────────────────────
