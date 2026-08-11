@@ -63,7 +63,8 @@ export class SyncRun {
   @Prop({ type: [Object], default: [] }) newProducts: SyncRunNewProduct[];
   @Prop({ type: [Object], default: [] }) updatedFields: SyncRunFieldChange[];
   @Prop({ default: 0 }) unchangedCount: number;
-  @Prop({ type: [Object], default: [] }) errors: SyncRunError[];
+  /** Renamed from `errors` — that name is reserved by Mongoose and causes a warning. */
+  @Prop({ type: [Object], default: [] }) syncErrors: SyncRunError[];
   @Prop({ type: [Object], default: [] }) notInSheet: SyncRunNotInSheet[];
   @Prop({ type: String, default: null }) reviewedBy: string | null;
   @Prop({ type: Date, default: null }) reviewedAt: Date | null;

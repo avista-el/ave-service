@@ -207,7 +207,7 @@ export class SyncService {
       newProducts,
       updatedFields,
       unchangedCount,
-      errors,
+      syncErrors: errors, // field renamed from `errors` (Mongoose reserved pathname)
       notInSheet,
     });
 
