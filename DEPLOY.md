@@ -98,8 +98,8 @@ docker compose up -d mongo redis meilisearch
 npm run start:dev
 ```
 
-API runs at http://localhost:3001  
-Swagger docs at http://localhost:3001/docs
+API runs at http://localhost:4000  
+Swagger docs at http://localhost:4000/docs
 
 ---
 
