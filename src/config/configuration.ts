@@ -2,6 +2,8 @@ export default () => ({
   port: parseInt(process.env.PORT ?? '4000', 10),
   clientOrigin: process.env.CLIENT_ORIGIN ?? 'http://localhost:3000',
 
+  swaggerEnabled: process.env.SWAGGER_ENABLED ?? false,
+
   database: {
     uri: process.env.MONGODB_URI ?? 'mongodb://localhost:27017/alphavista',
   },
