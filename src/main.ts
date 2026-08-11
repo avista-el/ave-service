@@ -43,34 +43,12 @@ async function bootstrap() {
   // ── URI versioning ───────────────────────────────────────────────────────────
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: "1" });
 
-  // ── Health check — registered BEFORE Swagger so it works even if Swagger fails
-  // Render's port scanner hits this endpoint to confirm the service is up.
-  const httpAdapter = app.getHttpAdapter();
-  httpAdapter.get(
-    "/health",
-    (_req: unknown, res: { status: (code: number) => { json(body: unknown): void } }) => {
-      res.status(200).json({
-        status: "ok",
-        version: "1.0.0",
-        timestamp: new Date().toISOString(),
-        env: nodeEnv,
-      });
-    },
-  );
-
-  // ── START LISTENING FIRST ────────────────────────────────────────────────────
-  // Bind the port immediately so Render detects it within the scan window.
-  // Swagger setup runs after — it's not required for the port to be open.
-  await app.listen(port, "0.0.0.0");
-  console.log(`\n🚀  Alphavista API → http://localhost:${port}`);
-  console.log(`❤️   Health check  → http://localhost:${port}/health`);
-
+  
   // ── Swagger / OpenAPI ────────────────────────────────────────────────────────
   // Runs after listen() — doesn't block port binding.
   const swaggerEnabled =
     nodeEnv !== "production" || config.get<string>("SWAGGER_ENABLED", "false") === "true";
 
-  console.log(`\n Swagger enabled ${config.get<string>("SWAGGER_ENABLED", "false") === "true"}`)
   if (swaggerEnabled) {
     const swaggerConfig = new DocumentBuilder()
       .setTitle("Alphavista Electronics API")
@@ -153,6 +131,28 @@ All routes are prefixed with \`/v1/\`.`,
 
     console.log(`📖  Swagger docs  → http://localhost:${port}/docs\n`);
   }
+
+  // ── Health check — registered BEFORE Swagger so it works even if Swagger fails
+  // Render's port scanner hits this endpoint to confirm the service is up.
+  const httpAdapter = app.getHttpAdapter();
+  httpAdapter.get(
+    "/health",
+    (_req: unknown, res: { status: (code: number) => { json(body: unknown): void } }) => {
+      res.status(200).json({
+        status: "ok",
+        version: "1.0.0",
+        timestamp: new Date().toISOString(),
+        env: nodeEnv,
+      });
+    },
+  );
+
+  // ── START LISTENING FIRST ────────────────────────────────────────────────────
+  // Bind the port immediately so Render detects it within the scan window.
+  // Swagger setup runs after — it's not required for the port to be open.
+  await app.listen(port, "0.0.0.0");
+  console.log(`\n🚀  Alphavista API → http://localhost:${port}`);
+  console.log(`❤️   Health check  → http://localhost:${port}/health`);
 }
 
 bootstrap();
