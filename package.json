@@ -10,7 +10,7 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "lint": "eslint \"src/**/*.ts\" --fix",
-    "seed": "ts-node -r tsconfig-paths/register scripts/seed.ts",
+    "seed": "ts-node -r tsconfig-paths/register --project tsconfig.seed.json scripts/seed.ts",
     "test": "jest --forceExit",
     "test:watch": "jest --watch",
     "test:cov": "jest --coverage --forceExit"
