@@ -55,11 +55,22 @@ class ApproveRunDto {
   @ApiProperty({
     type: [String],
     example: ["AV-1000:price", "AV-1001:stock"],
-    description: 'Array of "<sku>:<field>" change keys to commit',
+    description: 'Array of "<sku>:<field>" change keys to commit for existing products',
   })
   @IsArray()
   @IsString({ each: true })
   selectedChanges: string[];
+
+  @ApiProperty({
+    type: [String],
+    example: ["AV-0001", "AV-0002"],
+    description: "SKUs from newProducts to create as new catalogue entries",
+    required: false,
+  })
+  @IsArray()
+  @IsString({ each: true })
+  @IsOptional()
+  selectedNewSkus?: string[];
 }
 
 @ApiTags("Admin — Sync")
@@ -143,6 +154,11 @@ export class SyncController {
   @ApiEnvelopeOk(Object)
   @ApiBadRequestResponse({ description: "Run not in reviewable state", type: ApiErrorResponse })
   approveRun(@Param("id") id: string, @Body() dto: ApproveRunDto, @CurrentUser() user: JwtPayload) {
-    return this.syncService.approveSyncRun(id, dto.selectedChanges, user.sub);
+    return this.syncService.approveSyncRun(
+      id,
+      dto.selectedChanges,
+      user.sub,
+      dto.selectedNewSkus ?? [],
+    );
   }
 }

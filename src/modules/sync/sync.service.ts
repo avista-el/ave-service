@@ -1,6 +1,7 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from "@nestjs/common";
 import { InjectModel } from "@nestjs/mongoose";
 import { Model, Types } from "mongoose";
+import slugify from "slugify";
 import {
   SyncSource,
   SyncSourceDocument,
@@ -10,12 +11,13 @@ import {
   SyncRunNewProduct,
 } from "./schemas/sync.schema";
 import { Product, ProductDocument } from "../catalog/schemas/product.schema";
+import { Brand, BrandDocument } from "../catalog/schemas/brand.schema";
+import { Category, CategoryDocument } from "../catalog/schemas/category.schema";
 import { InventoryService } from "../inventory/inventory.service";
 import { AuditLogService } from "../audit-log/audit-log.service";
 
 const CLEAR_MARKER = "CLEAR";
 
-// Plain lean types avoid FlattenMaps<Document> incompatibility
 type LeanSyncSource = {
   _id: Types.ObjectId;
   name: string;
@@ -48,6 +50,10 @@ export class SyncService {
     private readonly runModel: Model<SyncRunDocument>,
     @InjectModel(Product.name)
     private readonly productModel: Model<ProductDocument>,
+    @InjectModel(Brand.name)
+    private readonly brandModel: Model<BrandDocument>,
+    @InjectModel(Category.name)
+    private readonly categoryModel: Model<CategoryDocument>,
     private readonly inventoryService: InventoryService,
     private readonly auditLogService: AuditLogService,
   ) {}
@@ -271,15 +277,17 @@ export class SyncService {
 
   async approveSyncRun(
     runId: string,
-    selectedChanges: string[],
+    selectedChanges: string[], // "<sku>:<field>" keys for existing-product updates
     actorId: string,
-  ): Promise<{ applied: number; skipped: number }> {
+    selectedNewSkus: string[] = [], // SKUs from newProducts to create
+  ): Promise<{ applied: number; created: number; skipped: number }> {
     const run = await this.runModel.findById(runId);
     if (!run) throw new NotFoundException("Sync run not found");
     if (!["pending_review", "partially_approved"].includes(run.status)) {
       throw new BadRequestException("Sync run is not in a reviewable state");
     }
 
+    // ── 1. Apply field updates to existing products ────────────────────────
     const selectedSet = new Set(selectedChanges);
     const toApply = run.updatedFields.filter((c) => selectedSet.has(`${c.sku}:${c.field}`));
 
@@ -308,7 +316,6 @@ export class SyncService {
         delete patch["stock"];
       }
 
-      // compareAtPrice needs explicit handling — it maps to a product field
       if ("compareAtPrice" in patch) {
         const val = patch["compareAtPrice"];
         patch["compareAtPrice"] = val === null || val === "" ? null : Number(val);
@@ -334,13 +341,173 @@ export class SyncService {
       applied++;
     }
 
+    // ── 2. Create new products ─────────────────────────────────────────────
+    const newSkuSet = new Set(selectedNewSkus.map((s) => s.toUpperCase()));
+    const toCreate = run.newProducts.filter((p) => newSkuSet.has(p.sku.toUpperCase()));
+
+    let created = 0;
+    const creationErrors: string[] = [];
+
+    // Cache brand + category lookups so we don't hit DB per product
+    const brandCache = new Map<string, BrandDocument | null>();
+    const categoryCache = new Map<string, CategoryDocument | null>();
+
+    for (const np of toCreate) {
+      const fields = np.fields as Record<string, unknown>;
+      const sku = np.sku.trim().toUpperCase();
+      const title = (fields["title"] as string | undefined)?.trim() ?? "";
+      const price = Number(fields["price"]);
+
+      if (!title || isNaN(price) || price <= 0) {
+        creationErrors.push(`${sku}: missing title or price`);
+        continue;
+      }
+
+      // ── Resolve brand ─────────────────────────────────────────────────────
+      const brandName = (fields["brand"] as string | undefined)?.trim();
+      let brand: BrandDocument | null = null;
+
+      if (brandName) {
+        const cacheKey = brandName.toLowerCase();
+        if (!brandCache.has(cacheKey)) {
+          const found = await this.brandModel.findOne({
+            $or: [
+              { name: { $regex: new RegExp(`^${brandName}$`, "i") } },
+              { slug: slugify(brandName, { lower: true, strict: true }) },
+            ],
+          });
+          brandCache.set(cacheKey, found as BrandDocument | null);
+        }
+        brand = brandCache.get(cacheKey) ?? null;
+
+        // Auto-create brand if it doesn't exist
+        if (!brand) {
+          const slug = slugify(brandName, { lower: true, strict: true });
+          brand = (await this.brandModel.create({
+            name: brandName,
+            slug,
+            logoUrl: "",
+          })) as BrandDocument;
+          brandCache.set(cacheKey, brand);
+          this.logger.log(`Sync: auto-created brand "${brandName}"`);
+        }
+      }
+
+      if (!brand) {
+        creationErrors.push(`${sku}: could not resolve brand "${brandName ?? "not provided"}"`);
+        continue;
+      }
+
+      // ── Resolve category ──────────────────────────────────────────────────
+      const categorySlugOrName = (fields["category"] as string | undefined)?.trim();
+      let category: CategoryDocument | null = null;
+
+      if (categorySlugOrName) {
+        const cacheKey = categorySlugOrName.toLowerCase();
+        if (!categoryCache.has(cacheKey)) {
+          const found = await this.categoryModel.findOne({
+            $or: [
+              { slug: categorySlugOrName.toLowerCase() },
+              { name: { $regex: new RegExp(`^${categorySlugOrName}$`, "i") } },
+            ],
+          });
+          categoryCache.set(cacheKey, found as CategoryDocument | null);
+        }
+        category = categoryCache.get(cacheKey) ?? null;
+      }
+
+      // Fall back to first available category if none matched
+      if (!category) {
+        if (!categoryCache.has("__default__")) {
+          const first = await this.categoryModel.findOne().sort({ sortOrder: 1 });
+          categoryCache.set("__default__", first as CategoryDocument | null);
+        }
+        category = categoryCache.get("__default__") ?? null;
+        if (categorySlugOrName) {
+          this.logger.warn(
+            `Sync: category "${categorySlugOrName}" not found for SKU ${sku}, using default`,
+          );
+        }
+      }
+
+      if (!category) {
+        creationErrors.push(`${sku}: no category available`);
+        continue;
+      }
+
+      // ── Resolve subcategory ───────────────────────────────────────────────
+      const subcategorySlug = (fields["subcategory"] as string | undefined)?.trim();
+      const subcategory = subcategorySlug
+        ? category.subcategories?.find(
+            (s) =>
+              s.slug === subcategorySlug.toLowerCase() ||
+              s.name?.toLowerCase() === subcategorySlug.toLowerCase(),
+          )
+        : undefined;
+
+      // ── Build slug ────────────────────────────────────────────────────────
+      let slug = slugify(`${brand.name} ${title}`, { lower: true, strict: true });
+      const slugExists = await this.productModel.exists({ slug });
+      if (slugExists) slug = `${slug}-${sku.toLowerCase()}`;
+
+      // ── Create the product ────────────────────────────────────────────────
+      try {
+        const doc = await this.productModel.create({
+          sku,
+          slug,
+          title: `${brand.name} ${title}`,
+          brandId: (brand._id as unknown as Types.ObjectId).toString(),
+          brandName: brand.name,
+          brandSlug: (brand as unknown as Record<string, unknown>).slug as string,
+          categoryId: (category._id as unknown as Types.ObjectId).toString(),
+          categoryName: category.name,
+          categorySlug: (category as unknown as Record<string, unknown>).slug as string,
+          subcategoryId: subcategory?.id ?? null,
+          subcategoryName: subcategory?.name ?? null,
+          subcategorySlug: subcategory?.slug ?? null,
+          price: price,
+          compareAtPrice:
+            fields["compareAtPrice"] != null ? Number(fields["compareAtPrice"]) : null,
+          stock: fields["stock"] != null ? parseInt(String(fields["stock"]), 10) : 0,
+          reserved: 0,
+          images: Array.isArray(fields["images"]) ? fields["images"] : [],
+          description: (fields["description"] as string | undefined) ?? "",
+          descriptionHtml: "",
+          specs: [],
+          status: (fields["status"] as string | undefined) ?? "draft",
+          tags: Array.isArray(fields["tags"]) ? fields["tags"] : [],
+          lastModifiedBy: `sync:${runId}`,
+        });
+
+        await this.auditLogService.log({
+          actor: `admin:${actorId}`,
+          action: "product.create",
+          entityType: "product",
+          entityId: (doc._id as unknown as Types.ObjectId).toString(),
+          before: null,
+          after: { sku, source: "sync" },
+          note: `SyncRun: ${runId}`,
+        });
+
+        created++;
+      } catch (err) {
+        const msg = (err as Error).message;
+        this.logger.error(`Sync: failed to create ${sku}: ${msg}`);
+        creationErrors.push(`${sku}: ${msg}`);
+      }
+    }
+
+    if (creationErrors.length) {
+      this.logger.warn(`Sync run ${runId}: ${creationErrors.length} creation error(s)`);
+    }
+
     const skipped = toApply.length - applied;
-    run.status = applied > 0 ? "published" : "partially_approved";
+    run.status = applied > 0 || created > 0 ? "published" : "partially_approved";
     run.reviewedBy = actorId;
     run.reviewedAt = new Date();
     await run.save();
 
-    return { applied, skipped };
+    return { applied, created, skipped };
   }
 
   // ─── Queries ──────────────────────────────────────────────────────────────
