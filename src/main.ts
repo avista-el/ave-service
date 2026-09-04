@@ -2,12 +2,25 @@ import { NestFactory } from "@nestjs/core";
 import { ValidationPipe, VersioningType } from "@nestjs/common";
 import { ConfigService } from "@nestjs/config";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
+import { json, urlencoded } from "express";
 import { AppModule } from "./app.module";
 import { HttpExceptionFilter } from "./common/filters/http-exception.filter";
 import { TransformInterceptor } from "./common/interceptors/transform.interceptor";
 
 async function bootstrap() {
-  const app = await NestFactory.create(AppModule, { rawBody: true });
+  // rawBody: true  — NestJS captures req.rawBody for webhook HMAC verification.
+  // bodyParser: false — we register our own json/urlencoded parsers below so we
+  //   can set a 10 MB limit, which covers bulk CSV sync payloads (the default is
+  //   100 kb and causes "request entity too large" when uploading large files).
+  const app = await NestFactory.create(AppModule, {
+    rawBody: true,
+    bodyParser: false,
+  });
+
+  // Register body parsers with a 10 MB ceiling BEFORE all other middleware.
+  // rawBody still works because NestJS captures it internally before these parsers.
+  app.use(json({ limit: "10mb" }));
+  app.use(urlencoded({ limit: "10mb", extended: true }));
 
   const config = app.get(ConfigService);
   const port = config.get<number>("PORT", 4000);
@@ -34,18 +47,16 @@ async function bootstrap() {
     }),
   );
 
-  // ── Response envelope ────────────────────────────────────────────────────────
+  // ── Response envelope — { success: true, data: ... } ─────────────────────────
   app.useGlobalInterceptors(new TransformInterceptor());
 
-  // ── Exception filter ─────────────────────────────────────────────────────────
+  // ── Exception filter — { success: false, statusCode, message, path } ─────────
   app.useGlobalFilters(new HttpExceptionFilter());
 
-  // ── URI versioning ───────────────────────────────────────────────────────────
+  // ── URI versioning — all routes under /v1/ ────────────────────────────────────
   app.enableVersioning({ type: VersioningType.URI, defaultVersion: "1" });
 
-  
   // ── Swagger / OpenAPI ────────────────────────────────────────────────────────
-  // Runs after listen() — doesn't block port binding.
   const swaggerEnabled =
     nodeEnv !== "production" || config.get<string>("SWAGGER_ENABLED", "false") === "true";
 
@@ -132,8 +143,7 @@ All routes are prefixed with \`/v1/\`.`,
     console.log(`📖  Swagger docs  → http://localhost:${port}/docs\n`);
   }
 
-  // ── Health check — registered BEFORE Swagger so it works even if Swagger fails
-  // Render's port scanner hits this endpoint to confirm the service is up.
+  // ── Health check ─────────────────────────────────────────────────────────────
   const httpAdapter = app.getHttpAdapter();
   httpAdapter.get(
     "/health",
@@ -147,9 +157,7 @@ All routes are prefixed with \`/v1/\`.`,
     },
   );
 
-  // ── START LISTENING FIRST ────────────────────────────────────────────────────
-  // Bind the port immediately so Render detects it within the scan window.
-  // Swagger setup runs after — it's not required for the port to be open.
+  // ── Start listening ───────────────────────────────────────────────────────────
   await app.listen(port, "0.0.0.0");
   console.log(`\n🚀  Alphavista API → http://localhost:${port}`);
   console.log(`❤️   Health check  → http://localhost:${port}/health`);
