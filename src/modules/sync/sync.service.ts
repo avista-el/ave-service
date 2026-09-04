@@ -148,15 +148,41 @@ export class SyncService {
 
       if (!existing) {
         const title = row[effectiveMapping["title"] ?? "title"] ?? "";
-        const rawPrice =
-          row[effectiveMapping["price_ngn"] ?? effectiveMapping["price"] ?? "price_ngn"];
-        const price = rawPrice ? parseFloat(rawPrice.replace(/[₦,\s]/g, "")) : null;
+
+        // Price: try the mapped column first, then scan all known price aliases
+        // directly in the row — handles CSVs where the column is named "price"
+        // or "unit_price" instead of the template's "price_ngn".
+        const priceAliases = ["price_ngn", "price", "unit_price", "selling_price", "amount"];
+        let rawPrice: string | undefined;
+        // 1. Try via mapping
+        const mappedPriceKey = effectiveMapping["price_ngn"] ?? effectiveMapping["price"];
+        if (mappedPriceKey) rawPrice = row[mappedPriceKey];
+        // 2. Fall back to scanning the row directly for known aliases
+        if (!rawPrice) {
+          for (const alias of priceAliases) {
+            if (row[alias] !== undefined && row[alias] !== "") {
+              rawPrice = row[alias];
+              break;
+            }
+          }
+        }
+        const price = rawPrice
+          ? parseFloat(rawPrice.replace(/[₦,₵\s]/g, "").replace(/[^0-9.]/g, ""))
+          : null;
+
         if (!title) {
           errors.push({ row: rowNum, sku, message: "New product missing required field: title" });
           continue;
         }
         if (price === null || isNaN(price)) {
-          errors.push({ row: rowNum, sku, message: "New product missing required field: price" });
+          errors.push({
+            row: rowNum,
+            sku,
+            message:
+              `New product missing required field: price. ` +
+              `Tried columns: ${priceAliases.join(", ")}. ` +
+              `Available columns: ${Object.keys(row).join(", ")}`,
+          });
           continue;
         }
         newProducts.push({ sku, fields: this.rowToFields(row, effectiveMapping) });
@@ -338,73 +364,95 @@ export class SyncService {
   ): Record<string, unknown> {
     const result: Record<string, unknown> = {};
 
-    // Full field map: system field name → Product schema field name
-    // Includes all columns present in the CSV template
+    // Full field map: system field name → internal field name stored in result
+    // Aliases cover both the template column names and common alternatives
     const fieldMap: Record<string, string> = {
+      // Core updatable fields
       title: "title",
       price: "price",
-      price_ngn: "price", // CSV template alias
+      price_ngn: "price", // template alias
+      unit_price: "price", // user alias
+      selling_price: "price", // user alias
       compare_at: "compareAtPrice",
-      compare_at_ngn: "compareAtPrice", // CSV template alias
+      compare_at_ngn: "compareAtPrice", // template alias
+      compare_price: "compareAtPrice", // user alias
       stock: "stock",
-      stock_qty: "stock", // CSV template alias
+      stock_qty: "stock", // template alias
+      quantity: "stock", // user alias
       description: "description",
       images: "images",
-      image_urls: "images", // CSV template alias
+      image_urls: "images", // template alias
       status: "status",
       tags: "tags",
-      // brand/category/subcategory are informational only in updates —
-      // they are accepted but treated as metadata, not written directly
-      // (product brand/category refs are set on creation, not via sync)
+      // Informational fields — stored as metadata on the new-product record
+      // so admins can see what brand/category was intended; not written to
+      // product.brandId/categoryId directly (those require ObjectId lookups)
+      brand: "brand",
+      brand_name: "brand", // user alias
+      category: "category",
+      category_name: "category", // user alias
+      subcategory: "subcategory",
+      subcategory_name: "subcategory", // user alias
     };
 
     for (const [systemField, colName] of Object.entries(mapping)) {
       const schemaField = fieldMap[systemField];
       if (!schemaField) continue;
 
-      // Look up by the column name as written in the sheet header or letter
+      // Look up by the column name (could be a letter from Sheets or a header from CSV)
       const raw = row[colName] ?? row[systemField];
       if (raw === undefined || raw === null || raw === "") continue;
 
-      switch (schemaField) {
-        case "price":
-        case "compareAtPrice": {
-          // Strip currency symbols / commas before parsing
-          const cleaned = raw.replace(/[₦,\s]/g, "");
-          const num = parseFloat(cleaned);
-          if (!isNaN(num)) result[schemaField] = num;
-          break;
-        }
-        case "stock": {
-          const num = parseInt(raw, 10);
-          // Keep as string so the executeRun stock path can validate
-          result["stock"] = isNaN(num) ? raw : String(num);
-          break;
-        }
-        case "images":
-        case "image_urls": {
-          // Comma- or newline-separated URLs
-          const urls = raw
-            .split(/[,\n]/)
-            .map((u) => u.trim())
-            .filter(Boolean);
-          if (urls.length) result["images"] = urls;
-          break;
-        }
-        case "tags": {
-          // Comma-separated tag values e.g. "deal,best_seller"
-          const validTags = ["new_arrival", "best_seller", "featured", "deal"];
-          const tags = raw
-            .split(",")
-            .map((t) => t.trim().toLowerCase())
-            .filter((t) => validTags.includes(t));
-          if (tags.length) result["tags"] = tags;
-          break;
-        }
-        default:
-          result[schemaField] = raw;
+      this.applyField(result, schemaField, raw);
+    }
+
+    // Also scan the row directly for any unaliased columns that match known field names
+    // This handles CSVs where the user didn't configure a mapping but has standard headers
+    for (const [rowKey, raw] of Object.entries(row)) {
+      if (!raw) continue;
+      const schemaField = fieldMap[rowKey.toLowerCase().replace(/\s+/g, "_")];
+      if (schemaField && !(schemaField in result)) {
+        this.applyField(result, schemaField, raw);
       }
     }
+
     return result;
+  }
+
+  /** Apply a single raw value to the result object using field-appropriate logic */
+  private applyField(result: Record<string, unknown>, schemaField: string, raw: string): void {
+    switch (schemaField) {
+      case "price":
+      case "compareAtPrice": {
+        const cleaned = raw.replace(/[₦,₵\s]/g, "").replace(/[^0-9.]/g, "");
+        const num = parseFloat(cleaned);
+        if (!isNaN(num)) result[schemaField] = num;
+        break;
+      }
+      case "stock": {
+        const num = parseInt(raw.replace(/[^0-9]/g, ""), 10);
+        result["stock"] = isNaN(num) ? raw : String(num);
+        break;
+      }
+      case "images": {
+        const urls = raw
+          .split(/[,\n]/)
+          .map((u) => u.trim())
+          .filter(Boolean);
+        if (urls.length) result["images"] = urls;
+        break;
+      }
+      case "tags": {
+        const validTags = ["new_arrival", "best_seller", "featured", "deal"];
+        const tags = raw
+          .split(",")
+          .map((t) => t.trim().toLowerCase())
+          .filter((t) => validTags.includes(t));
+        if (tags.length) result["tags"] = tags;
+        break;
+      }
+      default:
+        result[schemaField] = raw.trim();
+    }
   }
 }
