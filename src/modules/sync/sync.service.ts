@@ -287,6 +287,10 @@ export class SyncService {
       throw new BadRequestException("Sync run is not in a reviewable state");
     }
 
+    // Shared brand/category caches across both passes — avoid duplicate DB hits
+    const brandCache = new Map<string, BrandDocument>();
+    const categoryCache = new Map<string, CategoryDocument>();
+
     // ── 1. Apply field updates to existing products ────────────────────────
     const selectedSet = new Set(selectedChanges);
     const toApply = run.updatedFields.filter((c) => selectedSet.has(`${c.sku}:${c.field}`));
@@ -321,6 +325,55 @@ export class SyncService {
         patch["compareAtPrice"] = val === null || val === "" ? null : Number(val);
       }
 
+      // If brand changed, upsert the brand and update denormalised fields
+      if ("brand" in patch) {
+        const brandName = String(patch["brand"]).trim();
+        delete patch["brand"];
+        if (brandName) {
+          const brand = await this.upsertBrand(brandName, brandCache);
+          patch["brandId"] = (brand._id as unknown as Types.ObjectId).toString();
+          patch["brandName"] = brand.name;
+          patch["brandSlug"] = (brand as unknown as Record<string, unknown>).slug as string;
+        }
+      }
+
+      // If category changed, upsert the category and update denormalised fields
+      if ("category" in patch) {
+        const catName = String(patch["category"]).trim();
+        delete patch["category"];
+        if (catName) {
+          const cat = await this.upsertCategory(catName, categoryCache);
+          patch["categoryId"] = (cat._id as unknown as Types.ObjectId).toString();
+          patch["categoryName"] = cat.name;
+          patch["categorySlug"] = (cat as unknown as Record<string, unknown>).slug as string;
+
+          // Handle subcategory together with its parent category
+          if ("subcategory" in patch) {
+            const subName = String(patch["subcategory"]).trim();
+            delete patch["subcategory"];
+            if (subName) {
+              const sub = await this.upsertSubcategory(subName, cat, categoryCache);
+              patch["subcategoryId"] = sub.id;
+              patch["subcategoryName"] = sub.name;
+              patch["subcategorySlug"] = sub.slug;
+            }
+          }
+        }
+      } else if ("subcategory" in patch) {
+        // subcategory change without category change — find existing category from product
+        const subName = String(patch["subcategory"]).trim();
+        delete patch["subcategory"];
+        if (subName) {
+          const existingCat = await this.categoryModel.findById(product.get("categoryId"));
+          if (existingCat) {
+            const sub = await this.upsertSubcategory(subName, existingCat, categoryCache);
+            patch["subcategoryId"] = sub.id;
+            patch["subcategoryName"] = sub.name;
+            patch["subcategorySlug"] = sub.slug;
+          }
+        }
+      }
+
       if (Object.keys(patch).length > 0) {
         await this.productModel.findOneAndUpdate(
           { sku },
@@ -348,10 +401,6 @@ export class SyncService {
     let created = 0;
     const creationErrors: string[] = [];
 
-    // Cache brand + category lookups so we don't hit DB per product
-    const brandCache = new Map<string, BrandDocument | null>();
-    const categoryCache = new Map<string, CategoryDocument | null>();
-
     for (const np of toCreate) {
       const fields = np.fields as Record<string, unknown>;
       const sku = np.sku.trim().toUpperCase();
@@ -363,89 +412,38 @@ export class SyncService {
         continue;
       }
 
-      // ── Resolve brand ─────────────────────────────────────────────────────
+      // ── Resolve / auto-create brand ───────────────────────────────────────
       const brandName = (fields["brand"] as string | undefined)?.trim();
-      let brand: BrandDocument | null = null;
-
-      if (brandName) {
-        const cacheKey = brandName.toLowerCase();
-        if (!brandCache.has(cacheKey)) {
-          const found = await this.brandModel.findOne({
-            $or: [
-              { name: { $regex: new RegExp(`^${brandName}$`, "i") } },
-              { slug: slugify(brandName, { lower: true, strict: true }) },
-            ],
-          });
-          brandCache.set(cacheKey, found as BrandDocument | null);
-        }
-        brand = brandCache.get(cacheKey) ?? null;
-
-        // Auto-create brand if it doesn't exist
-        if (!brand) {
-          const slug = slugify(brandName, { lower: true, strict: true });
-          brand = (await this.brandModel.create({
-            name: brandName,
-            slug,
-            logoUrl: "",
-          })) as BrandDocument;
-          brandCache.set(cacheKey, brand);
-          this.logger.log(`Sync: auto-created brand "${brandName}"`);
-        }
-      }
-
-      if (!brand) {
-        creationErrors.push(`${sku}: could not resolve brand "${brandName ?? "not provided"}"`);
+      if (!brandName) {
+        creationErrors.push(`${sku}: brand is required`);
         continue;
       }
+      const brand = await this.upsertBrand(brandName, brandCache);
 
-      // ── Resolve category ──────────────────────────────────────────────────
+      // ── Resolve / auto-create category ────────────────────────────────────
       const categorySlugOrName = (fields["category"] as string | undefined)?.trim();
-      let category: CategoryDocument | null = null;
-
+      let category: CategoryDocument;
       if (categorySlugOrName) {
-        const cacheKey = categorySlugOrName.toLowerCase();
-        if (!categoryCache.has(cacheKey)) {
-          const found = await this.categoryModel.findOne({
-            $or: [
-              { slug: categorySlugOrName.toLowerCase() },
-              { name: { $regex: new RegExp(`^${categorySlugOrName}$`, "i") } },
-            ],
-          });
-          categoryCache.set(cacheKey, found as CategoryDocument | null);
+        category = await this.upsertCategory(categorySlugOrName, categoryCache);
+      } else {
+        // Fall back to first available category
+        const first = await this.categoryModel.findOne().sort({ sortOrder: 1 });
+        if (!first) {
+          creationErrors.push(`${sku}: no category available and none specified`);
+          continue;
         }
-        category = categoryCache.get(cacheKey) ?? null;
+        category = first as CategoryDocument;
+        this.logger.warn(`Sync: no category specified for ${sku}, using "${category.name}"`);
       }
 
-      // Fall back to first available category if none matched
-      if (!category) {
-        if (!categoryCache.has("__default__")) {
-          const first = await this.categoryModel.findOne().sort({ sortOrder: 1 });
-          categoryCache.set("__default__", first as CategoryDocument | null);
-        }
-        category = categoryCache.get("__default__") ?? null;
-        if (categorySlugOrName) {
-          this.logger.warn(
-            `Sync: category "${categorySlugOrName}" not found for SKU ${sku}, using default`,
-          );
-        }
+      // ── Resolve / auto-create subcategory ─────────────────────────────────
+      const subcategorySlugOrName = (fields["subcategory"] as string | undefined)?.trim();
+      let subcategory: { id: string; name: string; slug: string } | null = null;
+      if (subcategorySlugOrName) {
+        subcategory = await this.upsertSubcategory(subcategorySlugOrName, category, categoryCache);
       }
 
-      if (!category) {
-        creationErrors.push(`${sku}: no category available`);
-        continue;
-      }
-
-      // ── Resolve subcategory ───────────────────────────────────────────────
-      const subcategorySlug = (fields["subcategory"] as string | undefined)?.trim();
-      const subcategory = subcategorySlug
-        ? category.subcategories?.find(
-            (s) =>
-              s.slug === subcategorySlug.toLowerCase() ||
-              s.name?.toLowerCase() === subcategorySlug.toLowerCase(),
-          )
-        : undefined;
-
-      // ── Build slug ────────────────────────────────────────────────────────
+      // ── Build unique slug ─────────────────────────────────────────────────
       let slug = slugify(`${brand.name} ${title}`, { lower: true, strict: true });
       const slugExists = await this.productModel.exists({ slug });
       if (slugExists) slug = `${slug}-${sku.toLowerCase()}`;
@@ -455,7 +453,7 @@ export class SyncService {
         const doc = await this.productModel.create({
           sku,
           slug,
-          title: `${brand.name} ${title}`,
+          title: title.startsWith(brand.name) ? title : `${brand.name} ${title}`,
           brandId: (brand._id as unknown as Types.ObjectId).toString(),
           brandName: brand.name,
           brandSlug: (brand as unknown as Record<string, unknown>).slug as string,
@@ -465,7 +463,7 @@ export class SyncService {
           subcategoryId: subcategory?.id ?? null,
           subcategoryName: subcategory?.name ?? null,
           subcategorySlug: subcategory?.slug ?? null,
-          price: price,
+          price,
           compareAtPrice:
             fields["compareAtPrice"] != null ? Number(fields["compareAtPrice"]) : null,
           stock: fields["stock"] != null ? parseInt(String(fields["stock"]), 10) : 0,
@@ -485,7 +483,7 @@ export class SyncService {
           entityType: "product",
           entityId: (doc._id as unknown as Types.ObjectId).toString(),
           before: null,
-          after: { sku, source: "sync" },
+          after: { sku, brand: brand.name, category: category.name, source: "sync" },
           note: `SyncRun: ${runId}`,
         });
 
@@ -508,6 +506,125 @@ export class SyncService {
     await run.save();
 
     return { applied, created, skipped };
+  }
+
+  // ─── Taxonomy upsert helpers ──────────────────────────────────────────────
+
+  /**
+   * Find brand by name or slug; create it if it doesn't exist.
+   * Results are memoised in `cache` so a 797-row import hits the DB once per brand.
+   */
+  private async upsertBrand(
+    name: string,
+    cache: Map<string, BrandDocument>,
+  ): Promise<BrandDocument> {
+    const key = name.toLowerCase();
+    if (cache.has(key)) return cache.get(key)!;
+
+    const slug = slugify(name, { lower: true, strict: true });
+    let brand = (await this.brandModel.findOne({
+      $or: [
+        { name: { $regex: new RegExp(`^${name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") } },
+        { slug },
+      ],
+    })) as BrandDocument | null;
+
+    if (!brand) {
+      brand = (await this.brandModel.create({ name, slug, logoUrl: "" })) as BrandDocument;
+      this.logger.log(`Sync: auto-created brand "${name}"`);
+    }
+
+    cache.set(key, brand);
+    return brand;
+  }
+
+  /**
+   * Find category by name or slug; create it if it doesn't exist.
+   * Uses `$setOnInsert` via findOneAndUpdate with upsert so concurrent imports don't duplicate.
+   */
+  private async upsertCategory(
+    nameOrSlug: string,
+    cache: Map<string, CategoryDocument>,
+  ): Promise<CategoryDocument> {
+    const key = nameOrSlug.toLowerCase();
+    if (cache.has(key)) return cache.get(key)!;
+
+    const slug = slugify(nameOrSlug, { lower: true, strict: true });
+    // Try slug first (faster), then name
+    let cat = (await this.categoryModel.findOne({ slug })) as CategoryDocument | null;
+    if (!cat) {
+      cat = (await this.categoryModel.findOne({
+        name: { $regex: new RegExp(`^${nameOrSlug.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`, "i") },
+      })) as CategoryDocument | null;
+    }
+
+    if (!cat) {
+      // Determine a sensible display name — capitalise first letter of each word
+      const displayName = nameOrSlug
+        .split(/[-_\s]+/)
+        .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+        .join(" ");
+
+      cat = (await this.categoryModel.create({
+        name: displayName,
+        slug,
+        blurb: "",
+        imageUrl: "",
+        parentId: null,
+        subcategories: [],
+        sortOrder: 999,
+      })) as CategoryDocument;
+      this.logger.log(`Sync: auto-created category "${displayName}"`);
+    }
+
+    cache.set(key, cat);
+    return cat;
+  }
+
+  /**
+   * Find subcategory embedded in `category.subcategories`; push a new entry if absent.
+   * After mutating the DB document, updates `cache` with the refreshed document.
+   */
+  private async upsertSubcategory(
+    nameOrSlug: string,
+    category: CategoryDocument,
+    cache: Map<string, CategoryDocument>,
+  ): Promise<{ id: string; name: string; slug: string }> {
+    const slug = slugify(nameOrSlug, { lower: true, strict: true });
+    const lcName = nameOrSlug.toLowerCase();
+
+    // Check if it already exists in the embedded array
+    const existing = category.subcategories?.find(
+      (s) => s.slug === slug || s.name.toLowerCase() === lcName,
+    );
+    if (existing) return { id: existing.id, name: existing.name, slug: existing.slug };
+
+    // Build a display name
+    const displayName = nameOrSlug
+      .split(/[-_\s]+/)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
+      .join(" ");
+
+    const newSub = { id: slug, name: displayName, slug };
+
+    // Push into the category document
+    const updated = (await this.categoryModel.findByIdAndUpdate(
+      (category._id as unknown as Types.ObjectId).toString(),
+      { $push: { subcategories: newSub } },
+      { new: true },
+    )) as CategoryDocument;
+
+    this.logger.log(`Sync: auto-created subcategory "${displayName}" in "${category.name}"`);
+
+    // Refresh all cache entries pointing to this category document
+    const catKey = category.name.toLowerCase();
+    const catSlugKey = (
+      (category as unknown as Record<string, unknown>).slug as string
+    ).toLowerCase();
+    if (cache.has(catKey)) cache.set(catKey, updated);
+    if (cache.has(catSlugKey)) cache.set(catSlugKey, updated);
+
+    return newSub;
   }
 
   // ─── Queries ──────────────────────────────────────────────────────────────
