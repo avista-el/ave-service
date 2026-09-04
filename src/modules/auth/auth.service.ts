@@ -104,6 +104,15 @@ export class AuthService {
     return user;
   }
 
+  /** List all staff accounts (non-customer roles) — used by admin settings page */
+  async listAdminUsers() {
+    return this.userModel
+      .find({ role: { $in: ["super_admin", "merchandiser", "support_agent"] } })
+      .select("-passwordHash -refreshTokenHash -twoFactorSecret")
+      .sort({ role: 1, name: 1 })
+      .lean();
+  }
+
   // ─── Helpers ─────────────────────────────────────────────────────────────────
 
   private async issueTokenPair(user: UserDocument) {

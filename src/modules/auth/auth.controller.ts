@@ -7,12 +7,15 @@ import {
   ApiUnauthorizedResponse,
   ApiBadRequestResponse,
   ApiConflictResponse,
+  ApiForbiddenResponse,
 } from "@nestjs/swagger";
 import { AuthService } from "./auth.service";
 import { RegisterDto } from "./dto/register.dto";
 import { LoginDto } from "./dto/login.dto";
 import { RefreshTokenDto } from "./dto/refresh-token.dto";
 import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
+import { RolesGuard } from "../../common/guards/roles.guard";
+import { Roles } from "../../common/decorators/roles.decorator";
 import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import { JwtPayload } from "./strategies/jwt.strategy";
 import {
@@ -100,5 +103,27 @@ export class AuthController {
   @ApiUnauthorizedResponse({ description: "Missing or invalid JWT", type: ApiErrorResponse })
   me(@CurrentUser() user: JwtPayload) {
     return this.authService.profile(user.sub);
+  }
+}
+
+// ─── Admin-only users endpoint ─────────────────────────────────────────────────
+// Separate controller so the guard chain is cleaner.
+
+@ApiTags("Admin — Users")
+@ApiBearerAuth()
+@Controller({ path: "admin/users", version: "1" })
+@UseGuards(JwtAuthGuard, RolesGuard)
+@Roles("super_admin")
+@ApiForbiddenResponse({ description: "Super admin only", type: ApiErrorResponse })
+export class AdminUsersController {
+  constructor(private readonly authService: AuthService) {}
+
+  @Get()
+  @ApiOperation({
+    summary: "[Admin] List all admin users",
+    description: "Returns all users with role super_admin, merchandiser or support_agent.",
+  })
+  listAdminUsers() {
+    return this.authService.listAdminUsers();
   }
 }
