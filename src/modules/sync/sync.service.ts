@@ -93,13 +93,37 @@ export class SyncService {
     const source = await this.findSourceById(sourceId);
     const mapping = source.columnMapping;
 
+    // ── Auto-detect mapping mode ───────────────────────────────────────────
+    // Google Sheets mode: mapping values are column letters (A, B, C…).
+    //   Row keys are whatever the sheet API returns — could be letters or headers.
+    // CSV upload mode: rows are parsed with header names as keys (sku, title…).
+    //   In this case we build an identity mapping so row["sku"] → field "sku".
+    //
+    // Detection: if the first non-empty row already has a key matching one of
+    // the system field names directly, we're in CSV/header mode and should use
+    // the system field key as the row key directly, ignoring the stored column
+    // letter mapping.
+    const firstRow = rows[0] ?? {};
+    const systemFieldKeys = Object.keys(mapping); // e.g. ["sku", "title", "price_ngn", …]
+    const rowKeys = Object.keys(firstRow);
+    const csvHeaderMode = systemFieldKeys.some((k) => rowKeys.includes(k));
+
+    // Build the effective lookup mapping:
+    // csvHeaderMode → { "sku": "sku", "title": "title", … }  (identity)
+    // sheetsMode    → { "sku": "A",   "title": "B",   … }   (column letters)
+    const effectiveMapping: Record<string, string> = csvHeaderMode
+      ? Object.fromEntries(systemFieldKeys.map((k) => [k, k]))
+      : mapping;
+
     const updatedFields: SyncRunFieldChange[] = [];
     const newProducts: SyncRunNewProduct[] = [];
     const errors: Array<{ row: number; sku?: string; message: string }> = [];
     let unchangedCount = 0;
 
     const allSkus = new Set(
-      rows.map((r) => r[mapping["sku"]]?.trim().toUpperCase()).filter(Boolean) as string[],
+      rows
+        .map((r) => r[effectiveMapping["sku"] ?? "sku"]?.trim().toUpperCase())
+        .filter(Boolean) as string[],
     );
 
     const existingProducts = await this.productModel
@@ -113,7 +137,7 @@ export class SyncService {
       const row = rows[i]!;
       const rowNum = i + 2;
 
-      const sku = row[mapping["sku"]]?.trim().toUpperCase();
+      const sku = row[effectiveMapping["sku"] ?? "sku"]?.trim().toUpperCase();
       if (!sku) {
         errors.push({ row: rowNum, message: "SKU is missing or blank" });
         continue;
@@ -123,9 +147,10 @@ export class SyncService {
       const existing = productBySku.get(sku);
 
       if (!existing) {
-        const title = row[mapping["title"] ?? ""] ?? "";
-        const rawPrice = row[mapping["price"] ?? ""];
-        const price = rawPrice ? parseFloat(rawPrice) : null;
+        const title = row[effectiveMapping["title"] ?? "title"] ?? "";
+        const rawPrice =
+          row[effectiveMapping["price_ngn"] ?? effectiveMapping["price"] ?? "price_ngn"];
+        const price = rawPrice ? parseFloat(rawPrice.replace(/[₦,\s]/g, "")) : null;
         if (!title) {
           errors.push({ row: rowNum, sku, message: "New product missing required field: title" });
           continue;
@@ -134,11 +159,11 @@ export class SyncService {
           errors.push({ row: rowNum, sku, message: "New product missing required field: price" });
           continue;
         }
-        newProducts.push({ sku, fields: this.rowToFields(row, mapping) });
+        newProducts.push({ sku, fields: this.rowToFields(row, effectiveMapping) });
         continue;
       }
 
-      const fields = this.rowToFields(row, mapping);
+      const fields = this.rowToFields(row, effectiveMapping);
       let hasChange = false;
 
       for (const [field, rawValue] of Object.entries(fields)) {
