@@ -257,6 +257,12 @@ export class SyncService {
         delete patch["stock"];
       }
 
+      // compareAtPrice needs explicit handling — it maps to a product field
+      if ("compareAtPrice" in patch) {
+        const val = patch["compareAtPrice"];
+        patch["compareAtPrice"] = val === null || val === "" ? null : Number(val);
+      }
+
       if (Object.keys(patch).length > 0) {
         await this.productModel.findOneAndUpdate(
           { sku },
@@ -306,32 +312,72 @@ export class SyncService {
     mapping: Record<string, string>,
   ): Record<string, unknown> {
     const result: Record<string, unknown> = {};
+
+    // Full field map: system field name → Product schema field name
+    // Includes all columns present in the CSV template
     const fieldMap: Record<string, string> = {
       title: "title",
       price: "price",
+      price_ngn: "price", // CSV template alias
+      compare_at: "compareAtPrice",
+      compare_at_ngn: "compareAtPrice", // CSV template alias
       stock: "stock",
+      stock_qty: "stock", // CSV template alias
       description: "description",
       images: "images",
+      image_urls: "images", // CSV template alias
       status: "status",
+      tags: "tags",
+      // brand/category/subcategory are informational only in updates —
+      // they are accepted but treated as metadata, not written directly
+      // (product brand/category refs are set on creation, not via sync)
     };
 
     for (const [systemField, colName] of Object.entries(mapping)) {
-      if (!fieldMap[systemField]) continue;
-      const raw = row[colName];
-      if (raw === undefined || raw === null) continue;
+      const schemaField = fieldMap[systemField];
+      if (!schemaField) continue;
 
-      if (systemField === "price") {
-        const num = parseFloat(raw);
-        result["price"] = isNaN(num) ? raw : num;
-      } else if (systemField === "stock") {
-        result["stock"] = raw;
-      } else if (systemField === "images") {
-        result["images"] = raw
-          .split(/[,\n]/)
-          .map((u) => u.trim())
-          .filter(Boolean);
-      } else {
-        result[fieldMap[systemField]!] = raw;
+      // Look up by the column name as written in the sheet header or letter
+      const raw = row[colName] ?? row[systemField];
+      if (raw === undefined || raw === null || raw === "") continue;
+
+      switch (schemaField) {
+        case "price":
+        case "compareAtPrice": {
+          // Strip currency symbols / commas before parsing
+          const cleaned = raw.replace(/[₦,\s]/g, "");
+          const num = parseFloat(cleaned);
+          if (!isNaN(num)) result[schemaField] = num;
+          break;
+        }
+        case "stock": {
+          const num = parseInt(raw, 10);
+          // Keep as string so the executeRun stock path can validate
+          result["stock"] = isNaN(num) ? raw : String(num);
+          break;
+        }
+        case "images":
+        case "image_urls": {
+          // Comma- or newline-separated URLs
+          const urls = raw
+            .split(/[,\n]/)
+            .map((u) => u.trim())
+            .filter(Boolean);
+          if (urls.length) result["images"] = urls;
+          break;
+        }
+        case "tags": {
+          // Comma-separated tag values e.g. "deal,best_seller"
+          const validTags = ["new_arrival", "best_seller", "featured", "deal"];
+          const tags = raw
+            .split(",")
+            .map((t) => t.trim().toLowerCase())
+            .filter((t) => validTags.includes(t));
+          if (tags.length) result["tags"] = tags;
+          break;
+        }
+        default:
+          result[schemaField] = raw;
       }
     }
     return result;
