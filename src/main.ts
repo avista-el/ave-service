@@ -92,26 +92,35 @@ All routes are prefixed with \`/v1/\`.`,
       .setContact("Alphavista Dev", storefrontUrl, "dev@alphavista.ng")
       .addServer(`http://localhost:${port}`, "Local development")
       .addServer("https://ave-service.onrender.com", "Production (Render)")
+      // Name MUST be "bearer" — that is the implicit default NestJS uses when
+      // controllers call @ApiBearerAuth() with no argument. Changing the name
+      // here instead of every controller keeps all files in sync automatically.
       .addBearerAuth(
         {
           type: "http",
           scheme: "bearer",
           bearerFormat: "JWT",
           name: "Authorization",
-          description: "JWT access token from POST /v1/auth/login",
+          description:
+            "Paste the <code>accessToken</code> from <code>POST /v1/auth/login</code>. " +
+            "Click the global <strong>Authorize</strong> button at the top — it applies to every locked endpoint at once.",
           in: "header",
         },
-        "bearerAuth",
+        "bearer",
       )
       .addApiKey(
         {
           type: "apiKey",
           in: "header",
           name: "X-Guest-Id",
-          description: "UUID for guest cart operations",
+          description: "Client-generated UUID for anonymous cart operations",
         },
         "guestId",
       )
+      // Apply bearer globally — every endpoint that has @ApiBearerAuth() will
+      // automatically inherit the token set in the top-level Authorize dialog.
+      // Public endpoints override this with @ApiSecurity([]) if needed.
+      .addSecurityRequirements("bearer")
       .build();
 
     const document = SwaggerModule.createDocument(app, swaggerConfig, {
@@ -130,13 +139,14 @@ All routes are prefixed with \`/v1/\`.`,
         }
       `,
       swaggerOptions: {
-        persistAuthorization: true,
+        persistAuthorization: true, // token survives page refresh
         displayRequestDuration: true,
         filter: true,
         docExpansion: "none",
         tagsSorter: "alpha",
         operationsSorter: "alpha",
         defaultModelsExpandDepth: 2,
+        tryItOutEnabled: true, // "Try it out" open by default
       },
     });
 
