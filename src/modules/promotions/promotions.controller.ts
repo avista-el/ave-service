@@ -13,15 +13,19 @@ import { IsNotEmpty, IsNumber, IsOptional, IsString, Min } from "class-validator
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { PromotionsService } from "./promotions.service";
 import { CreateDiscountDto } from "./dto/create-discount.dto";
-import { JwtAuthGuard, OptionalJwtAuthGuard } from "../../common/guards/jwt-auth.guard";
+import { ApplyScopeDto } from "./dto/apply-scope.dto";
+import { JwtAuthGuard } from "../../common/guards/jwt-auth.guard";
 import { RolesGuard } from "../../common/guards/roles.guard";
 import { Roles } from "../../common/decorators/roles.decorator";
+import { CurrentUser } from "../../common/decorators/current-user.decorator";
 import {
   ApiEnvelopeOk,
   ApiEnvelopeCreated,
   ApiErrorResponse,
 } from "../../common/swagger/api-response.decorator";
 import { PromoValidateResponseDto } from "../../common/swagger/swagger-response.dto";
+
+type JwtPayload = { sub: string; email: string; role: string };
 
 class ValidatePromoDto {
   @ApiProperty({ example: "COOL20" })
@@ -74,8 +78,10 @@ export class PromotionsController {
 export class AdminPromotionsController {
   constructor(private readonly promotionsService: PromotionsService) {}
 
+  // ─── Discount code CRUD ───────────────────────────────────────────────────
+
   @Get()
-  @ApiOperation({ summary: "[Admin] List all discount codes" })
+  @ApiOperation({ summary: "[Admin] List all discount codes / campaigns" })
   @ApiEnvelopeOk(CreateDiscountDto, true)
   findAll() {
     return this.promotionsService.findAll();
@@ -105,5 +111,69 @@ export class AdminPromotionsController {
   async remove(@Param("id") id: string) {
     await this.promotionsService.remove(id);
     return { message: "Discount code deleted" };
+  }
+
+  // ─── Auto-apply application endpoints ────────────────────────────────────
+
+  @Get(":id/applications")
+  @ApiOperation({
+    summary: "[Admin] List scope applications for a campaign",
+    description:
+      "Returns all application bindings (active and inactive) attached to this campaign. " +
+      "Each binding records which scope/target is auto-discounted and who applied it.",
+  })
+  @ApiParam({ name: "id", description: "Campaign (DiscountCode) ObjectId" })
+  @ApiEnvelopeOk(Object, true)
+  @ApiNotFoundResponse({ description: "Campaign not found", type: ApiErrorResponse })
+  listApplications(@Param("id") id: string) {
+    return this.promotionsService.listApplications(id);
+  }
+
+  @Post(":id/apply")
+  @ApiOperation({
+    summary: "[Admin] Apply a campaign to a scope",
+    description:
+      "Binds an existing campaign to a product, category, or the entire catalogue. " +
+      "The discount becomes visible on the storefront immediately — no coupon code required.\n\n" +
+      "**Precedence (most-specific wins, no stacking):** product → category → catalogue. " +
+      "A product-level binding on a *different* campaign is unaffected by a new category binding here.\n\n" +
+      "**Duplicate guard:** re-applying the same (scope, targetId) pair on the same campaign " +
+      "is rejected — remove the existing application first.",
+  })
+  @ApiParam({ name: "id", description: "Campaign (DiscountCode) ObjectId" })
+  @ApiEnvelopeCreated(Object)
+  @ApiNotFoundResponse({ description: "Campaign not found", type: ApiErrorResponse })
+  @ApiConflictResponse({
+    description: "Duplicate active application for this (scope, targetId)",
+    type: ApiErrorResponse,
+  })
+  applyScope(
+    @Param("id") id: string,
+    @Body() dto: ApplyScopeDto,
+    @CurrentUser() actor: JwtPayload,
+  ) {
+    return this.promotionsService.applyScope(id, dto, actor.sub);
+  }
+
+  @Delete(":id/apply/:applicationId")
+  @ApiOperation({
+    summary: "[Admin] Remove one scope application from a campaign",
+    description:
+      "Permanently deletes a single application binding. " +
+      "Products whose price was resolved via this binding revert to basePrice on the next " +
+      "storefront read — no product documents are written.\n\n" +
+      "Removing a category-level binding does NOT affect products with their own " +
+      "independent product-level binding from any campaign.",
+  })
+  @ApiParam({ name: "id", description: "Campaign (DiscountCode) ObjectId" })
+  @ApiParam({ name: "applicationId", description: "Application sub-document ObjectId" })
+  @ApiEnvelopeOk(Object)
+  @ApiNotFoundResponse({
+    description: "Campaign or application not found",
+    type: ApiErrorResponse,
+  })
+  async removeApplication(@Param("id") id: string, @Param("applicationId") applicationId: string) {
+    await this.promotionsService.removeApplication(id, applicationId);
+    return { message: "Application removed" };
   }
 }

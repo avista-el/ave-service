@@ -4,16 +4,20 @@ import { Model, Connection, Types } from "mongoose";
 import { Order, OrderDocument, OrderStatus } from "./schemas/order.schema";
 import { Cart, CartDocument } from "../cart/schemas/cart.schema";
 import { InventoryService } from "../inventory/inventory.service";
+import { PriceResolutionService } from "../promotions/price-resolution.service";
 import { CreateOrderDto } from "./dto/create-order.dto";
 import { PaginationDto, paginate } from "../../common/dto/pagination.dto";
+import { Product, ProductDocument } from "../catalog/schemas/product.schema";
 
 @Injectable()
 export class OrderService {
   constructor(
     @InjectModel(Order.name) private readonly orderModel: Model<OrderDocument>,
     @InjectModel(Cart.name) private readonly cartModel: Model<CartDocument>,
+    @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
     @InjectConnection() private readonly connection: Connection,
     private readonly inventoryService: InventoryService,
+    private readonly priceResolution: PriceResolutionService,
   ) {}
 
   // ─── Create order + reserve stock atomically ──────────────────────────────
@@ -30,25 +34,79 @@ export class OrderService {
       throw new BadRequestException("Cart is empty or not found");
     }
 
-    // 2. Build order items from cart lines
-    const items = cart.lines.map((l) => ({
-      productId: l.productId,
-      sku: l.sku,
-      title: l.title,
-      image: l.image,
-      qty: l.quantity,
-      unitPrice: l.unitPrice,
-    }));
+    // 2. Re-validate prices server-side.
+    //
+    //    The server is the source of truth — we never trust cart.unitPrice.
+    //    For each line we:
+    //      a) fetch the live product document
+    //      b) run resolveEffectivePrice (auto-apply OR coupon, same function
+    //         used by the storefront display)
+    //      c) use the server-computed unitPrice for order totals
+    //
+    //    If an auto-apply discount is active AND the cart carries a promoCode,
+    //    resolveEffectivePrice throws ConflictException — the caller must
+    //    either remove the coupon or the auto-apply will take precedence.
+    const couponCode = cart.promoCode ?? undefined;
+
+    const productIds = cart.lines.map((l) => l.productId);
+    const products = await this.productModel
+      .find({ _id: { $in: productIds.map((id) => new Types.ObjectId(id)) } })
+      .lean<(ProductDocument & { _id: Types.ObjectId })[]>();
+
+    const productMap = new Map(products.map((p) => [p._id.toString(), p]));
+
+    const items: {
+      productId: string;
+      sku: string;
+      title: string;
+      image: string;
+      qty: number;
+      unitPrice: number;
+    }[] = [];
+
+    for (const line of cart.lines) {
+      const product = productMap.get(line.productId);
+      if (!product) {
+        throw new BadRequestException(`Product "${line.title}" is no longer available`);
+      }
+      if (product.status !== "active") {
+        throw new BadRequestException(`"${product.title}" is no longer available for purchase`);
+      }
+
+      // resolveEffectivePrice is the single source of truth for price — same
+      // function used by CatalogService for storefront display.
+      const resolved = await this.priceResolution.resolveEffectivePrice(
+        {
+          _id: product._id,
+          price: product.price,
+          categorySlug: product.categorySlug,
+          subcategorySlug: product.subcategorySlug ?? undefined,
+        },
+        couponCode,
+      );
+
+      items.push({
+        productId: line.productId,
+        sku: product.sku,
+        title: product.title,
+        image: product.images[0] ?? "",
+        qty: line.quantity,
+        unitPrice: resolved.effectivePrice,
+      });
+    }
+
     const subtotal = items.reduce((s, i) => s + i.unitPrice * i.qty, 0);
-    const discount = cart.discountAmount ?? 0;
-    const total = Math.max(0, subtotal - discount);
+
+    // Coupon discount is now baked into per-item unitPrices via resolveEffectivePrice.
+    // discountAmount on the order is kept at 0 to avoid double-counting.
+    // The promoCode field is preserved for audit/reporting purposes.
+    const total = subtotal;
 
     // 3. Reserve stock + create order in a single Mongo transaction
     const session = await this.connection.startSession();
     let order: OrderDocument;
     try {
       await session.withTransaction(async () => {
-        // Atomic stock reservation per item
         for (const item of items) {
           await this.inventoryService.reserveStock(item.productId, item.qty, session);
         }
@@ -66,7 +124,7 @@ export class OrderService {
               items,
               subtotal,
               promoCode: cart!.promoCode ?? null,
-              discountAmount: discount,
+              discountAmount: 0, // baked into unit prices; kept for schema compat
               total,
               paymentProvider: dto.paymentProvider,
               paymentReference,
@@ -105,7 +163,6 @@ export class OrderService {
     if (!order) throw new NotFoundException("Order not found");
     if (order.status !== "pending_payment") return order;
 
-    // Release reserved stock
     for (const item of order.items) {
       await this.inventoryService.releaseStock(item.productId, item.qty);
     }
