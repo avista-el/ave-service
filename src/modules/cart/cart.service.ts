@@ -5,6 +5,7 @@ import { Cart, CartDocument, CartLineEmbedded } from "./schemas/cart.schema";
 import { Product, ProductDocument } from "../catalog/schemas/product.schema";
 import { AddToCartDto, UpdateLineDto } from "./dto/cart.dto";
 import { Types } from "mongoose";
+import { PriceResolutionService } from "../promotions/price-resolution.service";
 
 const CART_TTL_DAYS = 14;
 
@@ -14,6 +15,7 @@ export class CartService {
     @InjectModel(Cart.name) private readonly cartModel: Model<CartDocument>,
     @InjectModel(Product.name)
     private readonly productModel: Model<ProductDocument>,
+    private readonly priceResolution: PriceResolutionService,
   ) {}
 
   // ─── Resolve or create cart ───────────────────────────────────────────────
@@ -50,12 +52,20 @@ export class CartService {
     const cart = await this.getOrCreate(userId, guestId);
     const existing = cart.lines.find((l) => l.productId === dto.productId);
 
+    // Resolve effective price (auto-apply discount or base price)
+    const { effectivePrice } = await this.priceResolution.resolveEffectivePrice({
+      _id: product._id,
+      price: product.price,
+      categorySlug: product.categorySlug,
+      subcategorySlug: product.subcategorySlug ?? undefined,
+    });
+
     if (existing) {
       const newQty = existing.quantity + dto.quantity;
       if (newQty > available)
         throw new BadRequestException(`Only ${available} unit(s) available for "${product.title}"`);
       existing.quantity = newQty;
-      existing.unitPrice = product.price; // refresh price on add
+      existing.unitPrice = effectivePrice; // refresh to current effective price on add
     } else {
       if (dto.quantity > available)
         throw new BadRequestException(`Only ${available} unit(s) available for "${product.title}"`);
@@ -64,7 +74,7 @@ export class CartService {
         sku: product.sku,
         title: product.title,
         image: product.images[0] ?? "",
-        unitPrice: product.price,
+        unitPrice: effectivePrice,
         quantity: dto.quantity,
       } as CartLineEmbedded);
     }

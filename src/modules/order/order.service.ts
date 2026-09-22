@@ -231,7 +231,7 @@ export class OrderService {
         .lean(),
       this.orderModel.countDocuments(filter),
     ]);
-    return paginate(items, total, pagination);
+    return paginate(items.map(this.withId), total, pagination);
   }
 
   async findAll(pagination: PaginationDto, status?: OrderStatus) {
@@ -245,10 +245,21 @@ export class OrderService {
         .lean(),
       this.orderModel.countDocuments(filter),
     ]);
-    return paginate(items, total, pagination);
+    return paginate(items.map(this.withId), total, pagination);
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
+
+  /**
+   * Lean documents don't have the Mongoose virtual `id` getter, so the
+   * frontend's ApiOrder.id would be undefined and calls like
+   * `cancel.mutateAsync(order.id)` would send "/admin/orders/undefined/cancel".
+   * This helper adds an explicit `id` string field to every lean result.
+   */
+  private withId = <T extends { _id: unknown }>(doc: T): T & { id: string } => ({
+    ...doc,
+    id: (doc._id as Types.ObjectId).toString(),
+  });
 
   private async nextOrderNumber(): Promise<string> {
     const last = await this.orderModel
