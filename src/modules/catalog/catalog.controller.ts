@@ -58,11 +58,9 @@ export class CatalogController {
   })
   @ApiPaginatedOk(ProductResponseDto)
   async listProducts(@Query() query: QueryProductsDto) {
-    const result = await this.catalogService.findAllProducts(query);
-    return {
-      ...result,
-      items: result.items.map((p) => this.catalogService.toProductResponse(p)),
-    };
+    // findAllProducts now returns resolved response objects (not raw LeanProduct),
+    // so we return the paginated result directly — no second toProductResponse pass.
+    return this.catalogService.findAllProducts(query);
   }
 
   @Get("products/:slug")
@@ -75,14 +73,10 @@ export class CatalogController {
   @ApiEnvelopeOk(ProductResponseDto)
   @ApiNotFoundResponse({ description: "Product not found", type: ApiErrorResponse })
   async getProduct(@Param("slug") slug: string) {
+    // findProductBySlug and getSimilarProducts now return resolved response objects.
     const product = await this.catalogService.findProductBySlug(slug);
-    const similar = await this.catalogService.getSimilarProducts(
-      (product._id as unknown as { toString(): string }).toString(),
-    );
-    return {
-      product: this.catalogService.toProductResponse(product),
-      similar: similar.map((p) => this.catalogService.toProductResponse(p)),
-    };
+    const similar = await this.catalogService.getSimilarProducts(product.id);
+    return { product, similar };
   }
 
   @Get("categories")
@@ -137,11 +131,7 @@ export class AdminCatalogController {
   })
   @ApiPaginatedOk(ProductResponseDto)
   async listProducts(@Query() query: QueryProductsDto) {
-    const result = await this.catalogService.findAllProducts(query, true);
-    return {
-      ...result,
-      items: result.items.map((p) => this.catalogService.toProductResponse(p)),
-    };
+    return this.catalogService.findAllProducts(query, true);
   }
 
   @Post("products")

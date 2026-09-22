@@ -1,13 +1,4 @@
-import {
-  Body,
-  Controller,
-  Delete,
-  Get,
-  Param,
-  Patch,
-  Post,
-  UseGuards,
-} from "@nestjs/common";
+import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards } from "@nestjs/common";
 import {
   ApiBearerAuth,
   ApiForbiddenResponse,
@@ -26,8 +17,8 @@ import { Roles } from "../../common/decorators/roles.decorator";
 import {
   ApiEnvelopeOk,
   ApiEnvelopeCreated,
+  ApiErrorResponse,
 } from "../../common/swagger/api-response.decorator";
-import { ApiErrorResponse } from "../../common/swagger/swagger-response.dto";
 
 // ─── Storefront (public) ──────────────────────────────────────────────────────
 
@@ -39,8 +30,7 @@ export class HeroBannersController {
   @Get()
   @ApiOperation({
     summary: "List active hero banners",
-    description:
-      "Returns only active banners ordered by sortOrder. Used by the homepage carousel.",
+    description: "Returns only active banners ordered by sortOrder. Used by the homepage carousel.",
   })
   @ApiEnvelopeOk(Object, true)
   async listActive() {
