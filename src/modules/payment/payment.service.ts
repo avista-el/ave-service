@@ -185,7 +185,11 @@ export class PaymentService {
           await this.inventoryService.commitReservedStock(item.productId, item.qty);
         }
       }
-    } else if (event.data.status === "failed") {
+    } else if (
+      event.event === "charge.failed" ||
+      event.event === "transfer.failed" ||
+      event.data.status === "failed"
+    ) {
       if (order) {
         await this.orderService.markFailed((order._id as unknown as Types.ObjectId).toString());
       }
