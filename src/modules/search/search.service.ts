@@ -27,6 +27,8 @@ export class SearchService implements OnModuleInit {
   private readonly client: MeiliSearch;
   /** Set to false after the first Meilisearch failure so we stop retrying */
   private meiliAvailable = true;
+  /** Tracks whether the MongoDB text index was created successfully */
+  private textIndexAvailable = false;
 
   constructor(
     @InjectModel(Product.name)
@@ -66,8 +68,10 @@ export class SearchService implements OnModuleInit {
         },
         { name: "product_text_search", default_language: "english" },
       );
+      this.textIndexAvailable = true;
     } catch {
-      // Index already exists — safe to ignore
+      // Index already exists — still safe to use
+      this.textIndexAvailable = true;
     }
 
     if (!this.meiliAvailable) return;
@@ -266,15 +270,24 @@ export class SearchService implements OnModuleInit {
     const filter: FilterQuery<ProductDocument> = { status: "active" };
 
     if (query.q?.trim()) {
-      const escaped = query.q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-      // Use $text if the text index is available, fall back to $regex
-      filter.$or = [
-        { $text: { $search: query.q } } as FilterQuery<ProductDocument>,
-        { title: { $regex: escaped, $options: "i" } },
-        { brandName: { $regex: escaped, $options: "i" } },
-        { categoryName: { $regex: escaped, $options: "i" } },
-        { sku: { $regex: escaped, $options: "i" } },
-      ];
+      const term = query.q.trim();
+      const escaped = term.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+      // $text must be a top-level operator — it cannot appear inside $or.
+      // Use it directly when the text index is available (always true on Atlas
+      // because onModuleInit ensures the index exists).
+      // Fall back to a pure regex $or only when $text would fail (e.g. the
+      // collection has no text index yet on a brand-new deployment).
+      if (this.textIndexAvailable) {
+        filter.$text = { $search: term };
+      } else {
+        filter.$or = [
+          { title: { $regex: escaped, $options: "i" } },
+          { brandName: { $regex: escaped, $options: "i" } },
+          { categoryName: { $regex: escaped, $options: "i" } },
+          { sku: { $regex: escaped, $options: "i" } },
+        ];
+      }
     }
 
     if (query.categorySlug) filter.categorySlug = query.categorySlug;
@@ -312,7 +325,6 @@ export class SearchService implements OnModuleInit {
       this.productModel.countDocuments(filter),
     ]);
 
-    // Shape to match the Meilisearch hit format the frontend expects
     const hits = items.map((p) => this.toIndexDoc(p as unknown as ProductDocument));
 
     return { items: hits, total, page, limit, query: query.q };
