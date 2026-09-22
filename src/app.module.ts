@@ -20,6 +20,7 @@ import { AuditLogModule } from "./modules/audit-log/audit-log.module";
 import { AnalyticsModule } from "./modules/analytics/analytics.module";
 import { SyncModule } from "./modules/sync/sync.module";
 import { NotificationsModule } from "./modules/notifications/notifications.module";
+import { HeroBannersModule } from "./modules/hero-banners/hero-banners.module";
 
 @Module({
   imports: [
@@ -109,6 +110,7 @@ import { NotificationsModule } from "./modules/notifications/notifications.modul
     AnalyticsModule,
     SyncModule,
     NotificationsModule,
+    HeroBannersModule,
     JobsModule,
   ],
 })

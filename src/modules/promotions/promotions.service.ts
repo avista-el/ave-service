@@ -21,9 +21,18 @@ type LeanDiscountCode = {
   scope: "all" | "category" | "product";
   targets: string[];
   active: boolean;
+  applications: Array<{
+    _id: Types.ObjectId;
+    scope: "product" | "category" | "catalogue";
+    targetId: string | null;
+    appliedBy: string;
+    appliedAt: Date;
+    active: boolean;
+  }>;
 };
 import { DiscountCode, DiscountCodeDocument } from "./schemas/discount-code.schema";
 import { CreateDiscountDto } from "./dto/create-discount.dto";
+import { ApplyScopeDto } from "./dto/apply-scope.dto";
 
 @Injectable()
 export class PromotionsService {
@@ -46,7 +55,7 @@ export class PromotionsService {
   }
 
   async findById(id: string): Promise<LeanDiscountCode> {
-    const doc = await this.discountModel.findById(id).lean();
+    const doc = await this.discountModel.findById(id).lean<LeanDiscountCode>();
     if (!doc) throw new NotFoundException("Discount code not found");
     return doc;
   }
@@ -107,5 +116,80 @@ export class PromotionsService {
       { code: code.toUpperCase() },
       { $inc: { usedCount: 1 } },
     );
+  }
+
+  // ─── Auto-apply applications ──────────────────────────────────────────────
+
+  /**
+   * Add a new application scope binding to an existing campaign.
+   *
+   * Duplicate guard: a (scope, targetId) pair that is already active on the
+   * same campaign is rejected — the admin should deactivate the existing one
+   * first if they want to re-apply with different settings.
+   */
+  async applyScope(
+    campaignId: string,
+    dto: ApplyScopeDto,
+    actorId: string,
+  ): Promise<LeanDiscountCode> {
+    const campaign = await this.discountModel.findById(campaignId);
+    if (!campaign) throw new NotFoundException("Campaign not found");
+
+    // Normalise targetId
+    const targetId = dto.scope === "catalogue" ? null : (dto.targetId ?? null);
+
+    // Guard: prevent duplicate active application for the same (scope, targetId)
+    const duplicate = campaign.applications.find(
+      (a) => a.active && a.scope === dto.scope && a.targetId === targetId,
+    );
+    if (duplicate) {
+      throw new ConflictException(
+        `An active application already exists for scope '${dto.scope}'` +
+          (targetId ? ` / target '${targetId}'` : "") +
+          `. Remove it first or deactivate it before re-applying.`,
+      );
+    }
+
+    campaign.applications.push({
+      _id: new Types.ObjectId(),
+      scope: dto.scope,
+      targetId,
+      appliedBy: actorId,
+      appliedAt: new Date(),
+      active: true,
+    } as any);
+
+    await campaign.save();
+    return campaign.toObject() as unknown as LeanDiscountCode;
+  }
+
+  /**
+   * Remove (permanently delete) a single application entry.
+   * Products whose price was resolved through this application will
+   * automatically revert to basePrice on the next read — no product
+   * documents are touched.
+   */
+  async removeApplication(campaignId: string, applicationId: string): Promise<void> {
+    const campaign = await this.discountModel.findById(campaignId);
+    if (!campaign) throw new NotFoundException("Campaign not found");
+
+    const idx = campaign.applications.findIndex((a) => a._id.toString() === applicationId);
+    if (idx === -1) throw new NotFoundException("Application not found");
+
+    campaign.applications.splice(idx, 1);
+    campaign.markModified("applications");
+    await campaign.save();
+  }
+
+  /**
+   * List all application entries for a campaign (active and inactive).
+   */
+  async listApplications(campaignId: string): Promise<LeanDiscountCode["applications"]> {
+    const campaign = await this.discountModel
+      .findById(campaignId)
+      .select("applications")
+      .lean<Pick<LeanDiscountCode, "applications">>();
+    if (!campaign) throw new NotFoundException("Campaign not found");
+    return campaign.applications ?? [];
   }
 }

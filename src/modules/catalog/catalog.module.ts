@@ -1,10 +1,11 @@
-import { Module } from '@nestjs/common';
-import { MongooseModule } from '@nestjs/mongoose';
-import { Product, ProductSchema } from './schemas/product.schema';
-import { Brand, BrandSchema } from './schemas/brand.schema';
-import { Category, CategorySchema } from './schemas/category.schema';
-import { CatalogService } from './catalog.service';
-import { CatalogController, AdminCatalogController } from './catalog.controller';
+import { Module } from "@nestjs/common";
+import { MongooseModule } from "@nestjs/mongoose";
+import { Product, ProductSchema } from "./schemas/product.schema";
+import { Brand, BrandSchema } from "./schemas/brand.schema";
+import { Category, CategorySchema } from "./schemas/category.schema";
+import { CatalogService } from "./catalog.service";
+import { CatalogController, AdminCatalogController } from "./catalog.controller";
+import { PromotionsModule } from "../promotions/promotions.module";
 
 @Module({
   imports: [
@@ -13,6 +14,8 @@ import { CatalogController, AdminCatalogController } from './catalog.controller'
       { name: Brand.name, schema: BrandSchema },
       { name: Category.name, schema: CategorySchema },
     ]),
+    // Provides PriceResolutionService (and DiscountCode model) to CatalogService.
+    PromotionsModule,
   ],
   providers: [CatalogService],
   controllers: [CatalogController, AdminCatalogController],

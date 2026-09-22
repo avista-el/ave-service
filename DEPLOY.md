@@ -48,16 +48,16 @@ In the Render dashboard for the `alphavista-api` service → **Environment**, ad
 
 ### Step 3 — Register webhooks with payment providers
 
-After the service is deployed and you have a stable URL (e.g. `https://alphavista-api.onrender.com`):
+After the service is deployed and you have a stable URL (e.g. `https://ave-service.onrender.com`):
 
 **Paystack:**
 - Dashboard → Settings → Webhooks → Add URL:
-  `https://alphavista-api.onrender.com/v1/payments/webhooks/paystack`
+  `https://ave-service.onrender.com/v1/payments/webhooks/paystack`
 - Copy the webhook secret into `PAYSTACK_WEBHOOK_SECRET`.
 
 **Flutterwave:**
 - Dashboard → Settings → Webhooks:
-  `https://alphavista-api.onrender.com/v1/payments/webhooks/flutterwave`
+  `https://ave-service.onrender.com/v1/payments/webhooks/flutterwave`
 - Set the hash secret and copy it to `FLUTTERWAVE_SECRET_KEY` (Flutterwave uses the same secret key for both webhook verification and API calls).
 
 ---
@@ -67,7 +67,7 @@ After the service is deployed and you have a stable URL (e.g. `https://alphavist
 After first deploy, call the reindex endpoint to populate the search index:
 
 ```bash
-curl -X POST https://alphavista-api.onrender.com/v1/admin/search/reindex \
+curl -X POST https://ave-service.onrender.com/v1/admin/search/reindex \
   -H "Authorization: Bearer <admin_access_token>"
 ```
 
@@ -77,10 +77,10 @@ curl -X POST https://alphavista-api.onrender.com/v1/admin/search/reindex \
 
 ```bash
 # Health check
-curl https://alphavista-api.onrender.com/health
+curl https://ave-service.onrender.com/health
 
 # Swagger docs (if SWAGGER_ENABLED=true)
-open https://alphavista-api.onrender.com/docs
+open https://ave-service.onrender.com/docs
 ```
 
 ---

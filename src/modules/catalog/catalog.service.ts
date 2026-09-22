@@ -11,6 +11,7 @@ import { QueryProductsDto, SortKey } from "./dto/query-products.dto";
 import { CreateBrandDto } from "./dto/create-brand.dto";
 import { CreateCategoryDto } from "./dto/create-category.dto";
 import { paginate, PaginatedResult } from "../../common/dto/pagination.dto";
+import { PriceResolutionService, ResolvableProduct } from "../promotions/price-resolution.service";
 
 // Use plain lean types to avoid FlattenMaps<Document> incompatibility
 type LeanProduct = Omit<ProductDocument, keyof Document> & { _id: Types.ObjectId };
@@ -23,6 +24,7 @@ export class CatalogService {
     @InjectModel(Product.name) private readonly productModel: Model<ProductDocument>,
     @InjectModel(Brand.name) private readonly brandModel: Model<BrandDocument>,
     @InjectModel(Category.name) private readonly categoryModel: Model<CategoryDocument>,
+    private readonly priceResolution: PriceResolutionService,
   ) {}
 
   // ─── Products ────────────────────────────────────────────────────────────────
@@ -63,7 +65,7 @@ export class CatalogService {
   async findAllProducts(
     query: QueryProductsDto,
     adminMode = false,
-  ): Promise<PaginatedResult<LeanProduct>> {
+  ): Promise<PaginatedResult<ReturnType<CatalogService["toProductResponse"]>>> {
     const filter: FilterQuery<ProductDocument> = {};
 
     if (!adminMode) {
@@ -109,7 +111,7 @@ export class CatalogService {
     };
     const sort = sortMap[query.sort ?? "featured"];
 
-    const [items, total] = await Promise.all([
+    const [raw, total] = await Promise.all([
       this.productModel
         .find(filter)
         .sort(sort)
@@ -119,13 +121,19 @@ export class CatalogService {
       this.productModel.countDocuments(filter),
     ]);
 
+    // Resolve effective prices for the whole page in one DB round-trip.
+    const priceMap = await this.priceResolution.resolveEffectivePriceBatch(raw.map(toResolvable));
+
+    const items = raw.map((p) => this.toProductResponse(p, priceMap.get(p._id.toString())));
+
     return paginate(items, total, query);
   }
 
-  async findProductBySlug(slug: string): Promise<LeanProduct> {
+  async findProductBySlug(slug: string): Promise<ReturnType<CatalogService["toProductResponse"]>> {
     const product = await this.productModel.findOne({ slug }).lean<LeanProduct>();
     if (!product) throw new NotFoundException("Product not found");
-    return product;
+    const resolved = await this.priceResolution.resolveEffectivePrice(toResolvable(product));
+    return this.toProductResponse(product, resolved);
   }
 
   async findProductById(id: string): Promise<LeanProduct> {
@@ -189,13 +197,19 @@ export class CatalogService {
     return updated!;
   }
 
-  async getSimilarProducts(productId: string, limit = 8): Promise<LeanProduct[]> {
+  async getSimilarProducts(
+    productId: string,
+    limit = 8,
+  ): Promise<ReturnType<CatalogService["toProductResponse"]>[]> {
     const product = await this.productModel.findById(productId).lean();
     if (!product) return [];
-    return this.productModel
+    const raw = await this.productModel
       .find({ _id: { $ne: productId }, categorySlug: product.categorySlug, status: "active" })
       .limit(limit)
       .lean<LeanProduct[]>();
+
+    const priceMap = await this.priceResolution.resolveEffectivePriceBatch(raw.map(toResolvable));
+    return raw.map((p) => this.toProductResponse(p, priceMap.get(p._id.toString())));
   }
 
   // ─── Brands ──────────────────────────────────────────────────────────────────
@@ -267,7 +281,21 @@ export class CatalogService {
     return slugify(value, { lower: true, strict: true, trim: true });
   }
 
-  toProductResponse(doc: LeanProduct | ProductDocument) {
+  /**
+   * Build the API response shape for a product.
+   *
+   * `resolved` is optional — admin endpoints that don't need storefront pricing
+   * (e.g. raw product edit) can call this without it and get priceBase only.
+   *
+   * When `resolved` is provided:
+   *   - `effectivePrice` is the discounted price customers pay.
+   *   - `autoAppliedDiscount` carries the campaign info for the storefront
+   *     "X% off — applied automatically" badge. null when no auto-apply matches.
+   */
+  toProductResponse(
+    doc: LeanProduct | ProductDocument,
+    resolved?: import("../promotions/price-resolution.service").ResolvedPrice,
+  ) {
     const id = (doc._id as unknown as Types.ObjectId).toString();
     const stockStatus = this.computeStockStatus((doc.stock ?? 0) - (doc.reserved ?? 0));
     const d = doc as Record<string, unknown>;
@@ -282,6 +310,9 @@ export class CatalogService {
         : undefined,
       priceBase: d["price"] as number,
       compareAtPrice: (d["compareAtPrice"] as number | null) ?? undefined,
+      // effectivePrice === priceBase when no discount is active.
+      effectivePrice: resolved?.effectivePrice ?? (d["price"] as number),
+      autoAppliedDiscount: resolved?.appliedCampaign ?? null,
       images: d["images"] as string[],
       specs: d["specs"] as { label: string; value: string }[],
       description: d["description"] as string,
@@ -301,4 +332,21 @@ export class CatalogService {
     if (available <= 5) return "low_stock";
     return "in_stock";
   }
+}
+
+// ─── Module-level helper ─────────────────────────────────────────────────────
+
+/**
+ * Map a lean product document to the narrow ResolvableProduct shape that
+ * PriceResolutionService needs. Defined outside the class so it can be
+ * used in both instance methods and any future static contexts.
+ */
+function toResolvable(p: LeanProduct): ResolvableProduct {
+  const d = p as Record<string, unknown>;
+  return {
+    _id: p._id,
+    price: d["price"] as number,
+    categorySlug: d["categorySlug"] as string,
+    subcategorySlug: (d["subcategorySlug"] as string | null) ?? undefined,
+  };
 }
