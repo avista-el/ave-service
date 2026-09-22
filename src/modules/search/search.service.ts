@@ -256,7 +256,7 @@ export class SearchService implements OnModuleInit {
     });
 
     return {
-      items: result.hits,
+      items: result.hits.map((h) => this.toApiShape(h as Record<string, unknown>)),
       total: result.estimatedTotalHits ?? 0,
       page,
       limit,
@@ -325,7 +325,9 @@ export class SearchService implements OnModuleInit {
       this.productModel.countDocuments(filter),
     ]);
 
-    const hits = items.map((p) => this.toIndexDoc(p as unknown as ProductDocument));
+    const hits = items.map((p) =>
+      this.toApiShape(this.toIndexDoc(p as unknown as ProductDocument) as Record<string, unknown>),
+    );
 
     return { items: hits, total, page, limit, query: query.q };
   }
@@ -336,7 +338,7 @@ export class SearchService implements OnModuleInit {
     q: string,
   ): Promise<{ title: string; slug: string; categoryName: string }[]> {
     const escaped = q.trim().replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const items = await this.productModel
+    return this.productModel
       .find({
         status: "active",
         $or: [
@@ -348,8 +350,6 @@ export class SearchService implements OnModuleInit {
       .select("title slug categoryName")
       .limit(8)
       .lean<{ title: string; slug: string; categoryName: string }[]>();
-
-    return items;
   }
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
@@ -378,6 +378,58 @@ export class SearchService implements OnModuleInit {
       ratingCount: p.ratingCount ?? 0,
       stockStatus,
       description: p.description?.slice(0, 500) ?? "",
+    };
+  }
+
+  /**
+   * Reshape a search hit (either from Meilisearch or from toIndexDoc) into
+   * the ApiProduct-compatible shape the frontend expects.
+   *
+   * The search index stores flat fields (ratingAvg, ratingCount, price, etc.)
+   * while the catalog API returns nested objects (rating.average, rating.count,
+   * priceBase, effectivePrice, …).  Both paths must produce the same shape so
+   * the frontend's toProduct() adapter works everywhere.
+   */
+  toApiShape(hit: Record<string, unknown>) {
+    return {
+      id: hit["id"] as string,
+      slug: hit["slug"] as string,
+      sku: (hit["sku"] as string | undefined) ?? "",
+      title: hit["title"] as string,
+      brand: {
+        id: (hit["brandId"] as string | undefined) ?? "",
+        name: (hit["brandName"] as string | undefined) ?? "",
+        slug: (hit["brandSlug"] as string | undefined) ?? "",
+      },
+      category: {
+        id: (hit["categoryId"] as string | undefined) ?? "",
+        name: (hit["categoryName"] as string | undefined) ?? "",
+        slug: (hit["categorySlug"] as string | undefined) ?? "",
+      },
+      subcategory: hit["subcategorySlug"]
+        ? {
+            id: (hit["subcategoryId"] as string | undefined) ?? "",
+            name: (hit["subcategoryName"] as string | undefined) ?? "",
+            slug: hit["subcategorySlug"] as string,
+          }
+        : undefined,
+      priceBase: (hit["price"] as number | undefined) ?? 0,
+      compareAtPrice: (hit["compareAtPrice"] as number | null | undefined) ?? undefined,
+      // Search hits have no auto-apply resolution — effectivePrice equals priceBase.
+      // The storefront will show the price as-is; auto-apply badges only appear
+      // on the catalog and product detail pages which go through CatalogService.
+      effectivePrice: (hit["price"] as number | undefined) ?? 0,
+      autoAppliedDiscount: null,
+      images: (hit["images"] as string[] | undefined) ?? [],
+      specs: [],
+      description: (hit["description"] as string | undefined) ?? "",
+      stockStatus: (hit["stockStatus"] as string | undefined) ?? "in_stock",
+      rating: {
+        average: (hit["ratingAvg"] as number | undefined) ?? 0,
+        count: (hit["ratingCount"] as number | undefined) ?? 0,
+      },
+      tags: (hit["tags"] as string[] | undefined) ?? [],
+      status: (hit["status"] as string | undefined) ?? "active",
     };
   }
 }
