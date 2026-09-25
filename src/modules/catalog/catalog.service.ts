@@ -161,11 +161,33 @@ export class CatalogService {
       (dto as Record<string, unknown>).brandSlug = brand.slug;
     }
 
+    // Resolve new category denorm fields when categoryId changes.
+    const resolvedCategoryId = dto.categoryId ?? product.categoryId;
     if (dto.categoryId && dto.categoryId !== product.categoryId) {
       const category = await this.categoryModel.findById(dto.categoryId).lean();
       if (!category) throw new NotFoundException("Category not found");
       (dto as Record<string, unknown>).categoryName = category.name;
       (dto as Record<string, unknown>).categorySlug = category.slug;
+    }
+
+    // Resolve subcategory denorm fields whenever subcategoryId is supplied.
+    // We must do this even if only subcategoryId changed (not categoryId),
+    // because the stored name/slug would otherwise be stale.
+    if ("subcategoryId" in dto) {
+      if (!dto.subcategoryId) {
+        // Explicitly clearing the subcategory
+        (dto as Record<string, unknown>).subcategoryName = null;
+        (dto as Record<string, unknown>).subcategorySlug = null;
+      } else {
+        const category = await this.categoryModel.findById(resolvedCategoryId).lean();
+        const sub = category?.subcategories?.find(
+          (s: { id: string; name: string; slug: string }) => s.id === dto.subcategoryId,
+        );
+        if (sub) {
+          (dto as Record<string, unknown>).subcategoryName = sub.name;
+          (dto as Record<string, unknown>).subcategorySlug = sub.slug;
+        }
+      }
     }
 
     const updated = await this.productModel.findByIdAndUpdate(
