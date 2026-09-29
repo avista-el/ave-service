@@ -1,5 +1,5 @@
-import { IsInt, IsOptional, Max, Min } from 'class-validator';
-import { Type } from 'class-transformer';
+import { IsInt, IsOptional, Max, Min } from "class-validator";
+import { Type } from "class-transformer";
 
 export class PaginationDto {
   @IsOptional()
@@ -12,7 +12,7 @@ export class PaginationDto {
   @Type(() => Number)
   @IsInt()
   @Min(1)
-  @Max(100)
+  @Max(10000)
   limit?: number = 20;
 
   get skip(): number {
@@ -28,11 +28,7 @@ export interface PaginatedResult<T> {
   pages: number;
 }
 
-export function paginate<T>(
-  items: T[],
-  total: number,
-  dto: PaginationDto,
-): PaginatedResult<T> {
+export function paginate<T>(items: T[], total: number, dto: PaginationDto): PaginatedResult<T> {
   const page = dto.page ?? 1;
   const limit = dto.limit ?? 20;
   return {
