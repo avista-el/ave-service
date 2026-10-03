@@ -1,7 +1,7 @@
 import { IsEnum, IsEmail, IsNotEmpty, IsOptional, IsString, ValidateNested } from "class-validator";
 import { Type } from "class-transformer";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
-import { PaymentProvider } from "../schemas/order.schema";
+import { PaymentMethod } from "../schemas/order.schema";
 
 export class ShippingAddressDto {
   @ApiProperty({ example: "Adaeze Okonkwo" }) @IsString() @IsNotEmpty() fullName: string;
@@ -35,9 +35,16 @@ export class CreateOrderDto {
   @IsString()
   customerName?: string;
 
-  @ApiProperty({ enum: ["paystack", "flutterwave"], example: "paystack" })
-  @IsEnum(["paystack", "flutterwave"])
-  paymentProvider: PaymentProvider;
+  @ApiProperty({
+    enum: ["paystack", "flutterwave", "pay_on_delivery", "installment"],
+    example: "paystack",
+    description:
+      "Payment method. 'paystack' and 'flutterwave' redirect to a hosted payment page. " +
+      "'pay_on_delivery' skips gateway — order goes straight to awaiting_delivery_payment. " +
+      "'installment' charges a 40% deposit via gateway and creates an InstallmentPlan.",
+  })
+  @IsEnum(["paystack", "flutterwave", "pay_on_delivery", "installment"])
+  paymentMethod: PaymentMethod;
 
   @ApiProperty({ type: ShippingAddressDto })
   @ValidateNested()

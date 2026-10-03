@@ -8,7 +8,6 @@ import { PriceResolutionService } from "../promotions/price-resolution.service";
 import { CreateOrderDto } from "./dto/create-order.dto";
 import { PaginationDto, paginate } from "../../common/dto/pagination.dto";
 import { Product, ProductDocument } from "../catalog/schemas/product.schema";
-
 @Injectable()
 export class OrderService {
   constructor(
@@ -114,6 +113,14 @@ export class OrderService {
         const orderNumber = await this.nextOrderNumber();
         const paymentReference = this.generateReference(orderNumber);
 
+        // Derive paymentProvider for gateway-backed methods; null for POD
+        const isGateway = dto.paymentMethod === "paystack" || dto.paymentMethod === "flutterwave";
+        const paymentProvider = isGateway ? dto.paymentMethod : null;
+
+        // POD orders skip gateway — go straight to awaiting_delivery_payment
+        const initialStatus =
+          dto.paymentMethod === "pay_on_delivery" ? "awaiting_delivery_payment" : "pending_payment";
+
         [order] = await this.orderModel.create(
           [
             {
@@ -124,12 +131,13 @@ export class OrderService {
               items,
               subtotal,
               promoCode: cart!.promoCode ?? null,
-              discountAmount: 0, // baked into unit prices; kept for schema compat
+              discountAmount: 0,
               total,
-              paymentProvider: dto.paymentProvider,
+              paymentMethod: dto.paymentMethod,
+              paymentProvider,
               paymentReference,
               shippingAddress: dto.shippingAddress,
-              status: "pending_payment",
+              status: initialStatus,
             },
           ],
           { session },
@@ -210,6 +218,47 @@ export class OrderService {
 
   // ─── Queries ──────────────────────────────────────────────────────────────
 
+  // ─── POD: confirm delivery payment ────────────────────────────────────────
+  /**
+   * Called by an admin after cash/POS is collected at the door.
+   * Commits reserved stock, marks order as both paid AND fulfilled
+   * (delivery and payment happen in the same real-world moment for POD).
+   */
+  async confirmDeliveryPayment(orderId: string): Promise<OrderDocument> {
+    const order = await this.orderModel.findById(orderId);
+    if (!order) throw new NotFoundException("Order not found");
+    if (order.status !== "awaiting_delivery_payment") {
+      throw new BadRequestException(
+        `Order is not awaiting delivery payment — current status: ${order.status}`,
+      );
+    }
+
+    for (const item of order.items) {
+      await this.inventoryService.commitReservedStock(item.productId, item.qty);
+    }
+
+    const now = new Date();
+    order.status = "fulfilled";
+    order.paidAt = now;
+    order.fulfilledAt = now;
+    return order.save();
+  }
+
+  // ─── BNPL: set order to in_installments after deposit confirmed ───────────
+  async markInInstallments(orderId: string): Promise<OrderDocument> {
+    const order = await this.orderModel.findByIdAndUpdate(
+      orderId,
+      { status: "in_installments" },
+      { new: true },
+    );
+    if (!order) throw new NotFoundException("Order not found");
+    return order;
+  }
+
+  // ─── Called by InstallmentService when plan is cancelled/defaulted ────────
+  async markCancelledByInstallmentPlan(orderId: string): Promise<void> {
+    await this.orderModel.findByIdAndUpdate(orderId, { status: "cancelled" });
+  }
   async findByReference(ref: string): Promise<OrderDocument | null> {
     return this.orderModel.findOne({ paymentReference: ref });
   }
@@ -281,6 +330,15 @@ export class OrderService {
     const cutoff = new Date(Date.now() - olderThanMinutes * 60 * 1000);
     return this.orderModel.find({
       status: "pending_payment",
+      createdAt: { $lt: cutoff },
+    });
+  }
+
+  /** Called by reservation-expiry job to find unconfirmed POD orders older than threshold */
+  async findStalePodOrders(olderThanDays: number): Promise<OrderDocument[]> {
+    const cutoff = new Date(Date.now() - olderThanDays * 24 * 60 * 60 * 1000);
+    return this.orderModel.find({
+      status: "awaiting_delivery_payment",
       createdAt: { $lt: cutoff },
     });
   }

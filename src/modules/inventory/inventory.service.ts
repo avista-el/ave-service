@@ -121,6 +121,27 @@ export class InventoryService {
     return updated!;
   }
 
+  // ─── Reverse committed stock (BNPL default/cancel — units go back to available) ─
+
+  async reverseCommittedStock(
+    productId: string,
+    qty: number,
+    session?: ClientSession,
+  ): Promise<void> {
+    // commitReservedStock did: stock -= qty, reserved -= qty
+    // Reverse means: stock += qty  (reserved was already zeroed out)
+    await this.productModel.findByIdAndUpdate(productId, { $inc: { stock: qty } }, { session });
+  }
+
+  async reverseCommittedStockBatch(
+    items: StockAdjustment[],
+    session?: ClientSession,
+  ): Promise<void> {
+    for (const item of items) {
+      await this.reverseCommittedStock(item.productId, item.qty, session);
+    }
+  }
+
   // ─── Expiry: release reservations for orders stuck in pending_payment ─────
   // Called by BullMQ reservation-expiry job.
 
