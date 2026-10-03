@@ -28,7 +28,17 @@ import { OrderResponseDto } from "../../common/swagger/swagger-response.dto";
 
 class AdminOrderQueryDto extends PaginationDto {
   @IsOptional()
-  @IsEnum(["pending_payment", "paid", "failed", "abandoned", "fulfilled", "cancelled", "refunded"])
+  @IsEnum([
+    "pending_payment",
+    "paid",
+    "failed",
+    "abandoned",
+    "fulfilled",
+    "cancelled",
+    "refunded",
+    "awaiting_delivery_payment",
+    "in_installments",
+  ])
   status?: OrderStatus;
 }
 
@@ -42,8 +52,12 @@ export class OrderController {
   @UseGuards(OptionalJwtAuthGuard)
   @Post()
   @ApiOperation({
-    summary: "Create order and get checkout URL",
-    description: `Creates a \`pending_payment\` order, atomically reserves stock for all line items (using a Mongo transaction), then returns the hosted payment URL from Paystack or Flutterwave. The frontend should redirect the customer to \`checkoutUrl\`. **Never trust a client-side redirect as payment confirmation** — wait for the webhook or poll \`GET /v1/orders/:id\`.`,
+    summary: "Create order",
+    description:
+      "Creates an order and reserves stock atomically. " +
+      "For `paystack`/`flutterwave`: returns a `checkoutUrl` to redirect the customer. " +
+      "For `pay_on_delivery`: order is placed immediately with status `awaiting_delivery_payment` — no redirect. " +
+      "For `installment`: charges a 40% deposit via gateway and returns a `checkoutUrl`.",
   })
   @ApiEnvelopeCreated(OrderResponseDto)
   @ApiBadRequestResponse({
@@ -89,7 +103,9 @@ export class AdminOrderController {
   @Get()
   @ApiOperation({
     summary: "[Admin] List all orders",
-    description: "Supports optional `status` filter. Returns newest first.",
+    description:
+      "Supports optional `status` filter. Returns newest first. " +
+      "New filterable statuses: `awaiting_delivery_payment`, `in_installments`.",
   })
   @ApiPaginatedOk(OrderResponseDto)
   listOrders(@Query() query: AdminOrderQueryDto) {
@@ -129,5 +145,23 @@ export class AdminOrderController {
   })
   cancel(@Param("id") id: string) {
     return this.orderService.markCancelled(id);
+  }
+
+  @Patch(":id/confirm-delivery-payment")
+  @ApiOperation({
+    summary: "[Admin] Confirm cash/POS payment collected at delivery",
+    description:
+      "Transitions a `pay_on_delivery` order from `awaiting_delivery_payment` → `fulfilled`. " +
+      "Commits reserved stock. Call this after the delivery rider collects payment.",
+  })
+  @ApiParam({ name: "id", description: "Order ObjectId" })
+  @ApiEnvelopeOk(OrderResponseDto)
+  @ApiBadRequestResponse({
+    description: "Order not awaiting delivery payment",
+    type: ApiErrorResponse,
+  })
+  @ApiNotFoundResponse({ description: "Order not found", type: ApiErrorResponse })
+  confirmDeliveryPayment(@Param("id") id: string) {
+    return this.orderService.confirmDeliveryPayment(id);
   }
 }

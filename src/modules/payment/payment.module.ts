@@ -1,21 +1,18 @@
-import { Module } from '@nestjs/common';
-import { MongooseModule } from '@nestjs/mongoose';
-import {
-  WebhookEvent,
-  WebhookEventSchema,
-} from './schemas/webhook-event.schema';
-import { PaymentService } from './payment.service';
-import { PaymentController } from './payment.controller';
-import { OrderModule } from '../order/order.module';
-import { InventoryModule } from '../inventory/inventory.module';
+import { Module } from "@nestjs/common";
+import { MongooseModule } from "@nestjs/mongoose";
+import { WebhookEvent, WebhookEventSchema } from "./schemas/webhook-event.schema";
+import { PaymentService } from "./payment.service";
+import { PaymentController } from "./payment.controller";
+import { OrderModule } from "../order/order.module";
+import { InventoryModule } from "../inventory/inventory.module";
+import { InstallmentModule } from "../installment/installment.module";
 
 @Module({
   imports: [
-    MongooseModule.forFeature([
-      { name: WebhookEvent.name, schema: WebhookEventSchema },
-    ]),
+    MongooseModule.forFeature([{ name: WebhookEvent.name, schema: WebhookEventSchema }]),
     OrderModule,
     InventoryModule,
+    InstallmentModule,
   ],
   providers: [PaymentService],
   controllers: [PaymentController],

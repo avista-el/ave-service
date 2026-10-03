@@ -51,7 +51,9 @@ export class PaymentController {
   @Post("initialize")
   @ApiOperation({
     summary: "Get hosted checkout URL",
-    description: `Call this after \`POST /v1/orders\`. Returns the provider's hosted checkout URL to redirect the customer to. Payment confirmation comes via webhook — never via the redirect.`,
+    description:
+      "Call this after `POST /v1/orders` for `paystack`, `flutterwave`, or `installment` orders. " +
+      "Returns the provider's hosted checkout URL. For `pay_on_delivery` orders this is a no-op — do not call it.",
   })
   @ApiEnvelopeOk(InitializePaymentResponseDto)
   @ApiBadRequestResponse({
@@ -63,8 +65,10 @@ export class PaymentController {
     @CurrentUser() _user: JwtPayload | undefined,
   ) {
     const order = await this.orderService.findById(dto.orderId);
-    if (dto.provider === "paystack") return this.paymentService.initializePaystack(order);
-    return this.paymentService.initializeFlutterwave(order);
+    const result = await this.paymentService.initializePayment(order);
+    if (!result)
+      throw new BadRequestException("This order does not require a payment gateway redirect");
+    return result;
   }
 
   @Post("webhooks/paystack")

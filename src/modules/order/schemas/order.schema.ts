@@ -2,9 +2,26 @@ import { Prop, Schema, SchemaFactory } from "@nestjs/mongoose";
 import { Document } from "mongoose";
 
 export type OrderStatus =
-  "pending_payment" | "paid" | "failed" | "abandoned" | "fulfilled" | "cancelled" | "refunded";
+  | "pending_payment"
+  | "paid"
+  | "failed"
+  | "abandoned"
+  | "fulfilled"
+  | "cancelled"
+  | "refunded"
+  | "awaiting_delivery_payment" // POD: order placed, cash/POS not yet collected
+  | "in_installments"; // BNPL: deposit paid, balance still being collected
 
 export type PaymentProvider = "paystack" | "flutterwave";
+
+/**
+ * How the customer is paying.
+ *   paystack / flutterwave — full upfront payment via gateway
+ *   pay_on_delivery        — cash or POS at the door; no gateway involved at checkout
+ *   installment            — 40% deposit via gateway, 60% over 3 monthly instalments
+ */
+export type PaymentMethod = "paystack" | "flutterwave" | "pay_on_delivery" | "installment";
+
 export type OrderDocument = Order & Document;
 
 export class OrderLineEmbedded {
@@ -31,7 +48,6 @@ export class Order {
   @Prop({ required: true, unique: true })
   orderNumber: string;
 
-  /** null for guest checkout — explicit type required to avoid CannotDetermineTypeError */
   @Prop({ type: String, default: null, index: true })
   customerId: string | null;
 
@@ -61,13 +77,45 @@ export class Order {
 
   @Prop({
     type: String,
-    enum: ["pending_payment", "paid", "failed", "abandoned", "fulfilled", "cancelled", "refunded"],
+    enum: [
+      "pending_payment",
+      "paid",
+      "failed",
+      "abandoned",
+      "fulfilled",
+      "cancelled",
+      "refunded",
+      "awaiting_delivery_payment",
+      "in_installments",
+    ],
     default: "pending_payment",
   })
   status: OrderStatus;
 
-  @Prop({ type: String, enum: ["paystack", "flutterwave"], required: true })
-  paymentProvider: PaymentProvider;
+  /**
+   * Which payment channel the customer chose.
+   * Replaces / extends the former `paymentProvider` field:
+   *   - "paystack" | "flutterwave"  → full gateway payment (same as before)
+   *   - "pay_on_delivery"           → POD; no gateway redirect
+   *   - "installment"               → BNPL; gateway used only for deposit
+   */
+  @Prop({
+    type: String,
+    enum: ["paystack", "flutterwave", "pay_on_delivery", "installment"],
+    required: true,
+  })
+  paymentMethod: PaymentMethod;
+
+  /**
+   * Kept for backward compat with PaymentModule webhook handlers that
+   * still need to know which gateway handled the charge (null for POD).
+   */
+  @Prop({
+    type: String,
+    enum: ["paystack", "flutterwave", null],
+    default: null,
+  })
+  paymentProvider: PaymentProvider | null;
 
   @Prop({ required: true, index: true })
   paymentReference: string;
@@ -89,9 +137,5 @@ export class Order {
 }
 
 export const OrderSchema = SchemaFactory.createForClass(Order);
-// orderNumber   — unique index already created by unique: true in @Prop
-// paymentReference — index already created by index: true in @Prop
-// customerId    — index already created by index: true in @Prop
-// These compound indexes are not expressible via @Prop, so they stay here:
 OrderSchema.index({ status: 1, createdAt: -1 });
 OrderSchema.index({ customerId: 1, createdAt: -1 });

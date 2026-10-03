@@ -21,6 +21,7 @@ import { AnalyticsModule } from "./modules/analytics/analytics.module";
 import { SyncModule } from "./modules/sync/sync.module";
 import { NotificationsModule } from "./modules/notifications/notifications.module";
 import { HeroBannersModule } from "./modules/hero-banners/hero-banners.module";
+import { InstallmentModule } from "./modules/installment/installment.module";
 
 @Module({
   imports: [
@@ -111,6 +112,7 @@ import { HeroBannersModule } from "./modules/hero-banners/hero-banners.module";
     SyncModule,
     NotificationsModule,
     HeroBannersModule,
+    InstallmentModule,
     JobsModule,
   ],
 })
