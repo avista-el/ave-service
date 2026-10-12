@@ -12,11 +12,33 @@ import { CreateBrandDto } from "./dto/create-brand.dto";
 import { CreateCategoryDto } from "./dto/create-category.dto";
 import { paginate, PaginatedResult } from "../../common/dto/pagination.dto";
 import { PriceResolutionService, ResolvableProduct } from "../promotions/price-resolution.service";
+import { RedisService } from "../cache/redis.service";
 
 // Use plain lean types to avoid FlattenMaps<Document> incompatibility
 type LeanProduct = Omit<ProductDocument, keyof Document> & { _id: Types.ObjectId };
 type LeanBrand = Omit<BrandDocument, keyof Document> & { _id: Types.ObjectId };
 type LeanCategory = Omit<CategoryDocument, keyof Document> & { _id: Types.ObjectId };
+
+// ─── Cache TTLs (seconds) ────────────────────────────────────────────────────
+const TTL = {
+  brands: 3600, // 1 h — rarely change
+  categories: 3600, // 1 h — rarely change
+  category: 3600, // 1 h
+  products: 120, // 2 min — stock/price can drift
+  product: 300, // 5 min — individual PDP
+  similar: 300, // 5 min
+} as const;
+
+// ─── Cache key helpers ───────────────────────────────────────────────────────
+const CK = {
+  brands: () => "catalog:brands",
+  categories: () => "catalog:categories",
+  category: (slug: string) => `catalog:category:${slug}`,
+  products: (query: QueryProductsDto, admin: boolean) =>
+    `catalog:products:${admin ? "admin" : "pub"}:${JSON.stringify(query)}`,
+  product: (slug: string) => `catalog:product:${slug}`,
+  similar: (id: string) => `catalog:similar:${id}`,
+};
 
 @Injectable()
 export class CatalogService {
@@ -25,6 +47,7 @@ export class CatalogService {
     @InjectModel(Brand.name) private readonly brandModel: Model<BrandDocument>,
     @InjectModel(Category.name) private readonly categoryModel: Model<CategoryDocument>,
     private readonly priceResolution: PriceResolutionService,
+    private readonly redis: RedisService,
   ) {}
 
   // ─── Products ────────────────────────────────────────────────────────────────
@@ -46,7 +69,7 @@ export class CatalogService {
 
     const slug = this.makeSlug(`${brand.name} ${dto.title}`);
 
-    return this.productModel.create({
+    const created = await this.productModel.create({
       ...dto,
       sku,
       slug,
@@ -60,12 +83,23 @@ export class CatalogService {
       stock: dto.stock ?? 0,
       lastModifiedBy: `admin:${actorId}`,
     });
+    // Invalidate product listing cache so new product appears immediately.
+    await this.redis.delPattern("catalog:products:*");
+    return created;
   }
 
   async findAllProducts(
     query: QueryProductsDto,
     adminMode = false,
   ): Promise<PaginatedResult<ReturnType<CatalogService["toProductResponse"]>>> {
+    // Admin queries skip the public cache to ensure fresh results.
+    if (!adminMode) {
+      const cacheKey = CK.products(query, false);
+      type ProductPage = PaginatedResult<ReturnType<CatalogService["toProductResponse"]>>;
+      const cached = await this.redis.getJson<ProductPage>(cacheKey);
+      if (cached) return cached;
+    }
+
     const filter: FilterQuery<ProductDocument> = {};
 
     if (!adminMode) {
@@ -126,14 +160,27 @@ export class CatalogService {
 
     const items = raw.map((p) => this.toProductResponse(p, priceMap.get(p._id.toString())));
 
-    return paginate(items, total, query);
+    const result = paginate(items, total, query);
+
+    if (!adminMode) {
+      await this.redis.setJson(CK.products(query, false), result, TTL.products);
+    }
+
+    return result;
   }
 
   async findProductBySlug(slug: string): Promise<ReturnType<CatalogService["toProductResponse"]>> {
+    type ProductDetail = ReturnType<CatalogService["toProductResponse"]>;
+    const cached = await this.redis.getJson<ProductDetail>(CK.product(slug));
+    if (cached) return cached;
+
     const product = await this.productModel.findOne({ slug }).lean<LeanProduct>();
     if (!product) throw new NotFoundException("Product not found");
     const resolved = await this.priceResolution.resolveEffectivePrice(toResolvable(product));
-    return this.toProductResponse(product, resolved);
+    const result = this.toProductResponse(product, resolved);
+
+    await this.redis.setJson(CK.product(slug), result, TTL.product);
+    return result;
   }
 
   async findProductById(id: string): Promise<LeanProduct> {
@@ -196,12 +243,23 @@ export class CatalogService {
       { new: true },
     );
     if (!updated) throw new NotFoundException("Product not found");
+    // Invalidate cached product page + listings containing this product
+    await Promise.all([
+      this.redis.del(CK.product(updated.slug as unknown as string)),
+      this.redis.delPattern("catalog:products:*"),
+      this.redis.delPattern("catalog:similar:*"),
+    ]);
     return updated;
   }
 
   async deleteProduct(id: string): Promise<void> {
     const result = await this.productModel.findByIdAndUpdate(id, { status: "archived" });
     if (!result) throw new NotFoundException("Product not found");
+    await Promise.all([
+      this.redis.del(CK.product(result.slug as unknown as string)),
+      this.redis.delPattern("catalog:products:*"),
+      this.redis.delPattern("catalog:similar:*"),
+    ]);
   }
 
   async toggleTag(id: string, tag: ProductTag, actorId: string): Promise<ProductDocument> {
@@ -216,6 +274,10 @@ export class CatalogService {
         : { $addToSet: { tags: tag }, lastModifiedBy: `admin:${actorId}` },
       { new: true },
     );
+    await Promise.all([
+      this.redis.del(CK.product(updated!.slug as unknown as string)),
+      this.redis.delPattern("catalog:products:*"),
+    ]);
     return updated!;
   }
 
@@ -223,6 +285,11 @@ export class CatalogService {
     productId: string,
     limit = 8,
   ): Promise<ReturnType<CatalogService["toProductResponse"]>[]> {
+    const cacheKey = CK.similar(productId);
+    type SimilarList = ReturnType<CatalogService["toProductResponse"]>[];
+    const cached = await this.redis.getJson<SimilarList>(cacheKey);
+    if (cached) return cached;
+
     const product = await this.productModel.findById(productId).lean();
     if (!product) return [];
     const raw = await this.productModel
@@ -231,7 +298,10 @@ export class CatalogService {
       .lean<LeanProduct[]>();
 
     const priceMap = await this.priceResolution.resolveEffectivePriceBatch(raw.map(toResolvable));
-    return raw.map((p) => this.toProductResponse(p, priceMap.get(p._id.toString())));
+    const result = raw.map((p) => this.toProductResponse(p, priceMap.get(p._id.toString())));
+
+    await this.redis.setJson(cacheKey, result, TTL.similar);
+    return result;
   }
 
   // ─── Brands ──────────────────────────────────────────────────────────────────
@@ -240,11 +310,21 @@ export class CatalogService {
     const slug = this.makeSlug(dto.name);
     const exists = await this.brandModel.exists({ slug });
     if (exists) throw new ConflictException("Brand slug already exists");
-    return this.brandModel.create({ name: dto.name, slug, logoUrl: dto.logoUrl ?? "" });
+    const brand = await this.brandModel.create({
+      name: dto.name,
+      slug,
+      logoUrl: dto.logoUrl ?? "",
+    });
+    await this.redis.del(CK.brands());
+    return brand;
   }
 
   async findAllBrands(): Promise<LeanBrand[]> {
-    return this.brandModel.find().sort({ name: 1 }).lean<LeanBrand[]>();
+    const cached = await this.redis.getJson<LeanBrand[]>(CK.brands());
+    if (cached) return cached;
+    const result = await this.brandModel.find().sort({ name: 1 }).lean<LeanBrand[]>();
+    await this.redis.setJson(CK.brands(), result, TTL.brands);
+    return result;
   }
 
   async findBrandById(id: string): Promise<LeanBrand> {
@@ -256,12 +336,14 @@ export class CatalogService {
   async updateBrand(id: string, dto: Partial<CreateBrandDto>): Promise<BrandDocument> {
     const brand = await this.brandModel.findByIdAndUpdate(id, dto, { new: true });
     if (!brand) throw new NotFoundException("Brand not found");
+    await this.redis.del(CK.brands());
     return brand;
   }
 
   async deleteBrand(id: string): Promise<void> {
     const result = await this.brandModel.findByIdAndDelete(id);
     if (!result) throw new NotFoundException("Brand not found");
+    await this.redis.del(CK.brands());
   }
 
   // ─── Categories ──────────────────────────────────────────────────────────────
@@ -270,31 +352,49 @@ export class CatalogService {
     const slug = this.makeSlug(dto.name);
     const exists = await this.categoryModel.exists({ slug });
     if (exists) throw new ConflictException("Category slug already exists");
-    return this.categoryModel.create({ ...dto, slug });
+    const category = await this.categoryModel.create({ ...dto, slug });
+    await this.redis.del(CK.categories());
+    return category;
   }
 
   async findAllCategories(): Promise<LeanCategory[]> {
-    return this.categoryModel
+    const cached = await this.redis.getJson<LeanCategory[]>(CK.categories());
+    if (cached) return cached;
+    const result = await this.categoryModel
       .find({ parentId: null })
       .sort({ sortOrder: 1, name: 1 })
       .lean<LeanCategory[]>();
+    await this.redis.setJson(CK.categories(), result, TTL.categories);
+    return result;
   }
 
   async findCategoryBySlug(slug: string): Promise<LeanCategory> {
+    const cacheKey = CK.category(slug);
+    const cached = await this.redis.getJson<LeanCategory>(cacheKey);
+    if (cached) return cached;
     const cat = await this.categoryModel.findOne({ slug }).lean<LeanCategory>();
     if (!cat) throw new NotFoundException("Category not found");
+    await this.redis.setJson(cacheKey, cat, TTL.category);
     return cat;
   }
 
   async updateCategory(id: string, dto: Partial<CreateCategoryDto>): Promise<CategoryDocument> {
     const cat = await this.categoryModel.findByIdAndUpdate(id, dto, { new: true });
     if (!cat) throw new NotFoundException("Category not found");
+    await Promise.all([
+      this.redis.del(CK.categories()),
+      this.redis.del(CK.category(cat.slug as unknown as string)),
+    ]);
     return cat;
   }
 
   async deleteCategory(id: string): Promise<void> {
     const result = await this.categoryModel.findByIdAndDelete(id);
     if (!result) throw new NotFoundException("Category not found");
+    await Promise.all([
+      this.redis.del(CK.categories()),
+      this.redis.del(CK.category(result.slug as unknown as string)),
+    ]);
   }
 
   // ─── Helpers ─────────────────────────────────────────────────────────────────

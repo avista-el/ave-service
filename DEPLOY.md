@@ -115,3 +115,41 @@ docker run -p 3001:3001 --env-file .env alphavista-api
 ## MongoDB replica set note
 
 Multi-document transactions (used for order creation + stock reservation) require a MongoDB replica set. MongoDB Atlas provides this by default. For local development the `docker-compose.yml` initialises a single-node replica set automatically via `scripts/mongo-init.js`.
+
+---
+
+## CDN caching (Cloudflare in front of Render)
+
+The API emits `Cache-Control` headers on every public `GET` response:
+
+| Endpoints | `s-maxage` | `stale-while-revalidate` |
+|---|---|---|
+| `GET /v1/catalog/products*` | 60 s | 300 s |
+| `GET /v1/catalog/categories*` | 3 600 s | 86 400 s |
+| `GET /v1/catalog/brands` | 3 600 s | 86 400 s |
+| `GET /v1/hero-banners` | 3 600 s | 86 400 s |
+
+For these to be cached at the Cloudflare edge (rather than just the browser):
+
+### 1 — Add the API domain to Cloudflare DNS
+
+Add an **A** or **CNAME** record pointing your API hostname (e.g. `api.alphavista.ng`) at the Render service IP / hostname, with the **orange-cloud proxy enabled**.
+
+### 2 — Create a Cloudflare Cache Rule
+
+In **Cloudflare → Caching → Cache Rules**, add a rule:
+
+- **When:** `http.request.method eq "GET"` AND `http.request.uri.path matches "^/v1/(catalog|hero-banners)"`
+- **Then:** Cache eligibility → **Eligible for cache**
+- **Edge TTL:** Use cache-control header (respects `s-maxage`)
+- **Browser TTL:** Respect existing headers
+
+This makes Cloudflare serve catalog and hero-banner responses from its edge PoPs worldwide, reducing cold-start latency on the Render starter plan.
+
+### 3 — Update CORS origin
+
+If you put the API behind a custom domain (`api.alphavista.ng`), update `CLIENT_ORIGIN` and `STOREFRONT_URL` in the Render dashboard to match the new URL, and update `VITE_API_URL` in the frontend `.env`.
+
+### ETag / 304 support
+
+The API also returns a weak `ETag` header on every cached response. When a CDN or browser re-validates, the API responds `304 Not Modified` (no body) when the content hasn't changed, saving bandwidth.

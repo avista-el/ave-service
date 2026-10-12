@@ -8,6 +8,7 @@ import {
   Post,
   Query,
   UseGuards,
+  UseInterceptors,
 } from "@nestjs/common";
 import {
   ApiBearerAuth,
@@ -42,6 +43,10 @@ import {
   BrandDto,
   CategoryDto,
 } from "../../common/swagger/swagger-response.dto";
+import {
+  HttpCacheInterceptor,
+  LongHttpCacheInterceptor,
+} from "../../common/interceptors/http-cache.interceptor";
 
 // ─── Storefront (public) ──────────────────────────────────────────────────────
 
@@ -51,6 +56,7 @@ export class CatalogController {
   constructor(private readonly catalogService: CatalogService) {}
 
   @Get("products")
+  @UseInterceptors(HttpCacheInterceptor)
   @ApiOperation({
     summary: "List products with filters",
     description:
@@ -64,6 +70,7 @@ export class CatalogController {
   }
 
   @Get("products/:slug")
+  @UseInterceptors(HttpCacheInterceptor)
   @ApiOperation({
     summary: "Get product by slug",
     description:
@@ -80,6 +87,7 @@ export class CatalogController {
   }
 
   @Get("categories")
+  @UseInterceptors(LongHttpCacheInterceptor)
   @ApiOperation({
     summary: "List all top-level categories with subcategories",
     description: "Returns the full category tree. Used by the mega-menu and shop-by-category grid.",
@@ -90,6 +98,7 @@ export class CatalogController {
   }
 
   @Get("categories/:slug")
+  @UseInterceptors(LongHttpCacheInterceptor)
   @ApiOperation({ summary: "Get category by slug" })
   @ApiParam({ name: "slug", example: "tvs" })
   @ApiEnvelopeOk(CategoryDto)
@@ -99,6 +108,7 @@ export class CatalogController {
   }
 
   @Get("brands")
+  @UseInterceptors(LongHttpCacheInterceptor)
   @ApiOperation({
     summary: "List all brands",
     description:

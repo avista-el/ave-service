@@ -1,4 +1,14 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post, UseGuards } from "@nestjs/common";
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UseGuards,
+  UseInterceptors,
+} from "@nestjs/common";
 import {
   ApiBearerAuth,
   ApiForbiddenResponse,
@@ -19,6 +29,7 @@ import {
   ApiEnvelopeCreated,
   ApiErrorResponse,
 } from "../../common/swagger/api-response.decorator";
+import { LongHttpCacheInterceptor } from "../../common/interceptors/http-cache.interceptor";
 
 // ─── Storefront (public) ──────────────────────────────────────────────────────
 
@@ -28,6 +39,7 @@ export class HeroBannersController {
   constructor(private readonly service: HeroBannersService) {}
 
   @Get()
+  @UseInterceptors(LongHttpCacheInterceptor)
   @ApiOperation({
     summary: "List active hero banners",
     description: "Returns only active banners ordered by sortOrder. Used by the homepage carousel.",

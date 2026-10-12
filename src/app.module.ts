@@ -5,6 +5,7 @@ import { ScheduleModule } from "@nestjs/schedule";
 import { BullModule } from "@nestjs/bull";
 import configuration from "./config/configuration";
 
+import { AppCacheModule } from "./modules/cache/app-cache.module";
 import { JobsModule } from "./modules/jobs/jobs.module";
 import { AuthModule } from "./modules/auth/auth.module";
 import { CatalogModule } from "./modules/catalog/catalog.module";
@@ -95,6 +96,9 @@ import { InstallmentModule } from "./modules/installment/installment.module";
 
     // ── Scheduler ────────────────────────────────────────────────────────────
     ScheduleModule.forRoot(),
+
+    // ── Application-level Redis cache (global — no per-module import needed) ─
+    AppCacheModule,
 
     // ── Feature modules ───────────────────────────────────────────────────────
     AuthModule,
