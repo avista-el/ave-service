@@ -29,12 +29,22 @@ async function bootstrap() {
   const storefrontUrl = config.get<string>("STOREFRONT_URL", "http://localhost:3000");
 
   // ── CORS ─────────────────────────────────────────────────────────────────────
+  // Split comma-separated origins (Render env vars support only strings)
+  const parseOrigins = (raw: string) =>
+    raw
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+
   app.enableCors({
     origin:
       nodeEnv === "production"
-        ? [clientOrigin, storefrontUrl]
-        : [clientOrigin, storefrontUrl, /localhost:\d+/],
+        ? [...parseOrigins(clientOrigin), ...parseOrigins(storefrontUrl)]
+        : [...parseOrigins(clientOrigin), ...parseOrigins(storefrontUrl), /localhost:\d+/],
     credentials: true,
+    // Cache preflight for 2 hours — browsers won't fire OPTIONS again within
+    // this window, dramatically reducing requests to Render's edge layer.
+    maxAge: 7200,
   });
 
   // ── Validation ───────────────────────────────────────────────────────────────
