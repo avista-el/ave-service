@@ -1,26 +1,23 @@
 import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from "@nestjs/common";
 import { createHash } from "crypto";
 import type { Request, Response } from "express";
-import { Observable } from "rxjs";
-import { map } from "rxjs/operators";
+import { EMPTY, Observable, of } from "rxjs";
+import { switchMap } from "rxjs/operators";
 
 /**
- * HTTP Cache-Control + ETag interceptor for **public, read-only** endpoints.
+ * HTTP Cache-Control + ETag interceptor for public, read-only GET endpoints.
  *
- * HOW IT WORKS
- * NestJS interceptors wrap the handler in an RxJS pipeline. The global
- * TransformInterceptor wraps the body in { success, data } using `map`.
- * This interceptor also uses `map` so it runs in the same pipeline pass,
- * before Express serialises and sends the response. Using `tap` here would
- * fire AFTER Express has already sent headers — causing ERR_HTTP_HEADERS_SENT.
+ * Execution order:
+ *   NestJS global interceptors wrap per-route ones (onion model).
+ *   TransformInterceptor (global) is the outer layer — its map() runs last.
+ *   This interceptor (per-route) is the inner layer — its switchMap() runs
+ *   first on the raw handler return value before the { success, data } wrap.
+ *   The ETag therefore hashes the raw data, which is stable across requests.
  *
- * 304 short-circuit:
- *   We compute a hash of the pre-serialised JS value and compare it to
- *   If-None-Match BEFORE calling next.handle() so we can avoid the DB+Redis
- *   round-trip entirely on cache hits. On a match we end the response early
- *   and return NEVER from the observable so NestJS doesn't try to write a body.
- *
- * Apply with  @UseInterceptors(HttpCacheInterceptor)  on any public GET route.
+ * 304 handling:
+ *   We check If-None-Match after the handler runs but before NestJS writes
+ *   the body. On a match we call res.end() and return EMPTY — NestJS never
+ *   attempts to write a response body on an already-ended response.
  */
 @Injectable()
 export class HttpCacheInterceptor implements NestInterceptor {
@@ -34,22 +31,19 @@ export class HttpCacheInterceptor implements NestInterceptor {
 
     if (req.method !== "GET") return next.handle();
 
+    const ifNoneMatch = req.headers["if-none-match"];
+
     return next.handle().pipe(
-      map((body) => {
-        // Headers can be set here because map runs synchronously before
-        // Express writes anything. NestJS writes the response after the
-        // full observable completes.
-        if (res.headersSent) return body;
+      switchMap((body) => {
+        if (res.headersSent) return of(body);
 
         const hash = createHash("sha1").update(JSON.stringify(body)).digest("hex").slice(0, 16);
         const etag = `W/"${hash}"`;
-        const ifNoneMatch = req.headers["if-none-match"];
 
+        // 304: end the response and return EMPTY so NestJS writes no body.
         if (ifNoneMatch === etag) {
           res.status(304).end();
-          // Return body unchanged — NestJS won't write it because the
-          // response is already ended.
-          return body;
+          return EMPTY;
         }
 
         res.setHeader(
@@ -59,18 +53,12 @@ export class HttpCacheInterceptor implements NestInterceptor {
         res.setHeader("ETag", etag);
         res.setHeader("Vary", "Accept-Encoding");
 
-        return body;
+        return of(body);
       }),
     );
   }
 }
 
-// ─── Preconfigured variants ───────────────────────────────────────────────────
-
-/**
- * Long-lived variant for endpoints whose data changes at most once an hour
- * (categories, brands, hero banners).
- */
 @Injectable()
 export class LongHttpCacheInterceptor extends HttpCacheInterceptor {
   protected override readonly sMaxAge = 3600;
