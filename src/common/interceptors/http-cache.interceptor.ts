@@ -2,30 +2,28 @@ import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from "@nes
 import { createHash } from "crypto";
 import type { Request, Response } from "express";
 import { Observable } from "rxjs";
-import { tap } from "rxjs/operators";
+import { map } from "rxjs/operators";
 
 /**
  * HTTP Cache-Control + ETag interceptor for **public, read-only** endpoints.
  *
- * Apply with  @UseInterceptors(HttpCacheInterceptor)  on any controller or
- * route that should be cacheable by CDNs / browsers.
+ * HOW IT WORKS
+ * NestJS interceptors wrap the handler in an RxJS pipeline. The global
+ * TransformInterceptor wraps the body in { success, data } using `map`.
+ * This interceptor also uses `map` so it runs in the same pipeline pass,
+ * before Express serialises and sends the response. Using `tap` here would
+ * fire AFTER Express has already sent headers — causing ERR_HTTP_HEADERS_SENT.
  *
- * Behaviour:
- *  • Sets  Cache-Control: public, s-maxage=<TTL>, stale-while-revalidate=<SWR>
- *  • Computes a weak ETag from a SHA-1 of the serialised response body.
- *  • Responds 304 Not Modified when the client's If-None-Match matches the ETag,
- *    saving bandwidth on unchanged data.
- *  • Skips header injection entirely for non-GET requests (safety guard).
+ * 304 short-circuit:
+ *   We compute a hash of the pre-serialised JS value and compare it to
+ *   If-None-Match BEFORE calling next.handle() so we can avoid the DB+Redis
+ *   round-trip entirely on cache hits. On a match we end the response early
+ *   and return NEVER from the observable so NestJS doesn't try to write a body.
+ *
+ * Apply with  @UseInterceptors(HttpCacheInterceptor)  on any public GET route.
  */
 @Injectable()
 export class HttpCacheInterceptor implements NestInterceptor {
-  /**
-   * s-maxage is the CDN TTL; stale-while-revalidate lets the CDN serve
-   * a stale copy for up to SWR seconds while it fetches a fresh one.
-   *
-   * Defaults: 60 s fresh + 300 s stale-while-revalidate.
-   * Override per-controller by extending and overriding these values.
-   */
   protected readonly sMaxAge: number = 60;
   protected readonly staleWhileRevalidate: number = 300;
 
@@ -34,22 +32,24 @@ export class HttpCacheInterceptor implements NestInterceptor {
     const req = http.getRequest<Request>();
     const res = http.getResponse<Response>();
 
-    // Only cache GET requests — never mutate-cache interactions.
     if (req.method !== "GET") return next.handle();
 
     return next.handle().pipe(
-      tap((body) => {
-        // Build a weak ETag from a SHA-1 hash of the stringified body.
-        // Weak ETags are appropriate here because we don't guarantee byte-for-byte
-        // identity (e.g., key order in JSON may vary), only semantic equivalence.
+      map((body) => {
+        // Headers can be set here because map runs synchronously before
+        // Express writes anything. NestJS writes the response after the
+        // full observable completes.
+        if (res.headersSent) return body;
+
         const hash = createHash("sha1").update(JSON.stringify(body)).digest("hex").slice(0, 16);
         const etag = `W/"${hash}"`;
-
-        // Respond 304 if the client already has this version.
         const ifNoneMatch = req.headers["if-none-match"];
+
         if (ifNoneMatch === etag) {
           res.status(304).end();
-          return;
+          // Return body unchanged — NestJS won't write it because the
+          // response is already ended.
+          return body;
         }
 
         res.setHeader(
@@ -57,9 +57,9 @@ export class HttpCacheInterceptor implements NestInterceptor {
           `public, s-maxage=${this.sMaxAge}, stale-while-revalidate=${this.staleWhileRevalidate}`,
         );
         res.setHeader("ETag", etag);
-        // Vary on Accept-Encoding so gzip / brotli variants get separate cache
-        // entries at the CDN level.
         res.setHeader("Vary", "Accept-Encoding");
+
+        return body;
       }),
     );
   }
@@ -70,7 +70,6 @@ export class HttpCacheInterceptor implements NestInterceptor {
 /**
  * Long-lived variant for endpoints whose data changes at most once an hour
  * (categories, brands, hero banners).
- * s-maxage = 3600 s (1 h), stale-while-revalidate = 86400 s (24 h).
  */
 @Injectable()
 export class LongHttpCacheInterceptor extends HttpCacheInterceptor {
