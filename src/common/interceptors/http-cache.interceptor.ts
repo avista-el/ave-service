@@ -1,9 +1,4 @@
-import {
-  CallHandler,
-  ExecutionContext,
-  Injectable,
-  NestInterceptor,
-} from "@nestjs/common";
+import { CallHandler, ExecutionContext, Injectable, NestInterceptor } from "@nestjs/common";
 import { createHash } from "crypto";
 import type { Request, Response } from "express";
 import { Observable } from "rxjs";
@@ -31,8 +26,8 @@ export class HttpCacheInterceptor implements NestInterceptor {
    * Defaults: 60 s fresh + 300 s stale-while-revalidate.
    * Override per-controller by extending and overriding these values.
    */
-  protected readonly sMaxAge = 60;
-  protected readonly staleWhileRevalidate = 300;
+  protected readonly sMaxAge: number = 60;
+  protected readonly staleWhileRevalidate: number = 300;
 
   intercept(context: ExecutionContext, next: CallHandler): Observable<unknown> {
     const http = context.switchToHttp();
@@ -47,10 +42,7 @@ export class HttpCacheInterceptor implements NestInterceptor {
         // Build a weak ETag from a SHA-1 hash of the stringified body.
         // Weak ETags are appropriate here because we don't guarantee byte-for-byte
         // identity (e.g., key order in JSON may vary), only semantic equivalence.
-        const hash = createHash("sha1")
-          .update(JSON.stringify(body))
-          .digest("hex")
-          .slice(0, 16);
+        const hash = createHash("sha1").update(JSON.stringify(body)).digest("hex").slice(0, 16);
         const etag = `W/"${hash}"`;
 
         // Respond 304 if the client already has this version.
