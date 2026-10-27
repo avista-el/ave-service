@@ -25,6 +25,15 @@ export class CreateOrderDto {
   @IsString()
   cartId?: string;
 
+  @ApiPropertyOptional({
+    example: "f47ac10b-58cc-4372-a567-0e02b2c3d479",
+    description:
+      "Guest ID from X-Guest-Id header — used to locate the guest cart when cartId is absent and the user is not logged in",
+  })
+  @IsOptional()
+  @IsString()
+  guestId?: string;
+
   @ApiPropertyOptional({ example: "adaeze@example.com" })
   @IsOptional()
   @IsEmail()

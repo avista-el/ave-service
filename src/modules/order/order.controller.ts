@@ -1,4 +1,5 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from "@nestjs/common";
+import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from "@nestjs/common";
+import type { Request } from "express";
 import {
   ApiBearerAuth,
   ApiOperation,
@@ -64,7 +65,17 @@ export class OrderController {
     description: "Cart is empty / validation error",
     type: ApiErrorResponse,
   })
-  createOrder(@Body() dto: CreateOrderDto, @CurrentUser() user: JwtPayload | undefined) {
+  createOrder(
+    @Body() dto: CreateOrderDto,
+    @CurrentUser() user: JwtPayload | undefined,
+    @Req() req: Request,
+  ) {
+    // Inject guestId from X-Guest-Id header so guest carts can be found
+    // even when cartId is not explicitly provided in the payload.
+    if (!dto.guestId && !dto.cartId) {
+      const guestId = req.headers["x-guest-id"] as string | undefined;
+      if (guestId) dto.guestId = guestId;
+    }
     return this.orderService.createOrder(dto, user?.sub ?? null);
   }
 

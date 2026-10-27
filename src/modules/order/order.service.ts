@@ -22,12 +22,17 @@ export class OrderService {
   // ─── Create order + reserve stock atomically ──────────────────────────────
 
   async createOrder(dto: CreateOrderDto, userId: string | null): Promise<OrderDocument> {
-    // 1. Resolve cart
+    // 1. Resolve cart — three paths:
+    //    a) explicit cartId in the payload (most reliable, works for both guest and user)
+    //    b) logged-in user → find by userId
+    //    c) guest → find by guestId (passed from X-Guest-Id header via controller)
     let cart: CartDocument | null = null;
     if (dto.cartId) {
       cart = await this.cartModel.findById(dto.cartId);
     } else if (userId) {
       cart = await this.cartModel.findOne({ userId });
+    } else if (dto.guestId) {
+      cart = await this.cartModel.findOne({ guestId: dto.guestId });
     }
     if (!cart || cart.lines.length === 0) {
       throw new BadRequestException("Cart is empty or not found");
