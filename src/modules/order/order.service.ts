@@ -119,8 +119,13 @@ export class OrderService {
         const paymentReference = this.generateReference(orderNumber);
 
         // Derive paymentProvider for gateway-backed methods; null for POD
+        // installment deposits are always processed through Paystack
         const isGateway = dto.paymentMethod === "paystack" || dto.paymentMethod === "flutterwave";
-        const paymentProvider = isGateway ? dto.paymentMethod : null;
+        const paymentProvider = isGateway
+          ? dto.paymentMethod
+          : dto.paymentMethod === "installment"
+            ? "paystack"
+            : null;
 
         // POD orders skip gateway — go straight to awaiting_delivery_payment
         const initialStatus =

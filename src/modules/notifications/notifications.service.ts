@@ -14,11 +14,11 @@ export class NotificationsService {
     this.resend = new Resend(this.config.get<string>('resend.apiKey'));
     this.fromEmail = this.config.get<string>(
       'resend.fromEmail',
-      'orders@mail.alphavista.ng',
+      'orders@mail.alphavistaelectronics.com',
     );
     this.storefrontUrl = this.config.get<string>(
       'storefront.baseUrl',
-      'https://alphavista.ng',
+      'https://alphavistaelectronics.com',
     );
   }
 
