@@ -43,7 +43,7 @@ export class AddressEmbedded {
   @Prop({ default: "Nigeria" }) country: string;
 }
 
-@Schema({ timestamps: true, collection: "orders" })
+@Schema({ timestamps: true, collection: "orders", toJSON: { virtuals: true } })
 export class Order {
   @Prop({ required: true, unique: true })
   orderNumber: string;

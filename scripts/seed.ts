@@ -327,7 +327,7 @@ async function main() {
   console.log("── 4. Products");
 
   // Placeholder Cloudinary URLs — replace with real asset URLs in production
-  const CDN = "https://res.cloudinary.com/demo/image/upload";
+  const CDN = "https://res.cloudinary.com/rw4hznem/image/upload";
   const IMG: Record<string, string> = {
     tvs: `${CDN}/alphavista/product-tv.jpg`,
     refrigerators: `${CDN}/alphavista/product-fridge.jpg`,
