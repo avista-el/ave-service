@@ -295,9 +295,9 @@ export class OrderService {
     if (!order) {
       // Either not found or already in a terminal state — safe to ignore
       this.logger.warn({ event: "mark_paid_no_op", orderId, webhookId });
-      const existing = await this.orderModel.findById(orderId).lean();
+      const existing = await this.orderModel.findById(orderId);
       if (!existing) throw new NotFoundException("Order not found");
-      return existing as OrderDocument;
+      return existing;
     }
     this.logger.log({ event: "order_paid", orderNumber: order.orderNumber, webhookId });
     return order;
@@ -361,9 +361,9 @@ export class OrderService {
    * @deprecated Prefer markFailedAttempt directly.
    */
   async markFailed(orderId: string): Promise<OrderDocument> {
-    const order = await this.orderModel.findById(orderId).lean();
+    const order = await this.orderModel.findById(orderId);
     if (!order) throw new NotFoundException("Order not found");
-    if (order.status !== "pending_payment") return order as OrderDocument;
+    if (order.status !== "pending_payment") return order;
 
     // Find the most recent INITIATED attempt and mark it failed
     const latestRef = [...(order.paymentAttempts ?? [])]
@@ -371,9 +371,9 @@ export class OrderService {
       .find((a) => a.status === "INITIATED")?.reference;
 
     if (latestRef) {
-      return (await this.markFailedAttempt({ reference: latestRef })) ?? (order as OrderDocument);
+      return (await this.markFailedAttempt({ reference: latestRef })) ?? order;
     }
-    return order as OrderDocument;
+    return order;
   }
 
   async markAbandoned(orderId: string): Promise<void> {
