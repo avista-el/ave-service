@@ -23,6 +23,7 @@ import { PaymentModule } from "../payment/payment.module";
 import { SearchModule } from "../search/search.module";
 import { CatalogModule } from "../catalog/catalog.module";
 import { InstallmentModule } from "../installment/installment.module";
+import { NotificationsModule } from "../notifications/notifications.module";
 
 @Module({
   imports: [
@@ -40,6 +41,7 @@ import { InstallmentModule } from "../installment/installment.module";
     SearchModule,
     CatalogModule,
     InstallmentModule,
+    NotificationsModule,
   ],
   providers: [
     ReconcileProcessor,
