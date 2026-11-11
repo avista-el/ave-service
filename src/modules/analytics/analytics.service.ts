@@ -111,10 +111,17 @@ export class AnalyticsService {
     const result = await this.orderModel.aggregate([
       { $match: { status: { $in: ["paid", "fulfilled"] } } },
       { $unwind: "$items" },
+      // items.productId is stored as a string; cast to ObjectId so $lookup
+      // can match against products._id (which is an ObjectId).
+      {
+        $addFields: {
+          "items.productOid": { $toObjectId: "$items.productId" },
+        },
+      },
       {
         $lookup: {
           from: "products",
-          localField: "items.productId",
+          localField: "items.productOid",
           foreignField: "_id",
           as: "product",
         },
