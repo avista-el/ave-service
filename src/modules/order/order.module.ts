@@ -1,7 +1,6 @@
 import { forwardRef, Module } from "@nestjs/common";
 import { MongooseModule } from "@nestjs/mongoose";
 import { ConfigModule } from "@nestjs/config";
-import { ThrottlerModule } from "@nestjs/throttler";
 import { Order, OrderSchema } from "./schemas/order.schema";
 import { Cart, CartSchema } from "../cart/schemas/cart.schema";
 import { InventoryModule } from "../inventory/inventory.module";
@@ -15,7 +14,6 @@ import { OrderController, AdminOrderController } from "./order.controller";
 @Module({
   imports: [
     ConfigModule,
-    ThrottlerModule,
     MongooseModule.forFeature([
       { name: Order.name, schema: OrderSchema },
       { name: Cart.name, schema: CartSchema },
