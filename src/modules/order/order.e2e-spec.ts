@@ -6,8 +6,8 @@
  *
  * Run with:  npm run test:orders
  */
-
-import { Test, type INestApplication } from "@nestjs/testing";
+import { Test } from "@nestjs/testing";
+import type { INestApplication } from "@nestjs/common";
 import { Injectable, ValidationPipe, VersioningType } from "@nestjs/common";
 import { APP_GUARD } from "@nestjs/core";
 import { ConfigModule } from "@nestjs/config";
@@ -23,7 +23,7 @@ import { PassportStrategy } from "@nestjs/passport";
 import { Strategy, ExtractJwt } from "passport-jwt";
 import { HttpExceptionFilter } from "../../common/filters/http-exception.filter";
 import { Model, Connection } from "mongoose";
-import * as request from "supertest";
+import request from "supertest";
 import { MongoMemoryReplSet } from "mongodb-memory-server";
 import * as crypto from "crypto";
 
@@ -353,7 +353,7 @@ describe("Guest Order Flow (E2E)", () => {
     setupFetchMock();
     // Reset throttler in-memory counters so rate-limit tests start clean
     try {
-      const throttlerStorage = testModuleRef.get<ThrottlerStorageService>(ThrottlerStorage);
+      const throttlerStorage = testModuleRef.get(ThrottlerStorage) as ThrottlerStorageService;
       if (throttlerStorage?.storage) {
         for (const key of Object.keys(throttlerStorage.storage)) {
           delete throttlerStorage.storage[key];
