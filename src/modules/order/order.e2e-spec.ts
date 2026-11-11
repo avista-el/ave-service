@@ -9,9 +9,15 @@
 
 import { Test, type INestApplication } from "@nestjs/testing";
 import { Injectable, ValidationPipe, VersioningType } from "@nestjs/common";
+import { APP_GUARD } from "@nestjs/core";
 import { ConfigModule } from "@nestjs/config";
 import { MongooseModule } from "@nestjs/mongoose";
-import { ThrottlerModule, ThrottlerStorageService, ThrottlerStorage } from "@nestjs/throttler";
+import {
+  ThrottlerModule,
+  ThrottlerStorageService,
+  ThrottlerStorage,
+  ThrottlerGuard,
+} from "@nestjs/throttler";
 import { PassportModule } from "@nestjs/passport";
 import { PassportStrategy } from "@nestjs/passport";
 import { Strategy, ExtractJwt } from "passport-jwt";
@@ -276,6 +282,9 @@ describe("Guest Order Flow (E2E)", () => {
         PassportModule.register({ defaultStrategy: "jwt" }),
       ],
       providers: [
+        // Wire up the global throttler guard — same as AppModule does in production.
+        // Without this, @Throttle() decorators are ignored in the test app.
+        { provide: APP_GUARD, useClass: ThrottlerGuard },
         StubJwtStrategy,
         CartService,
         OrderService,
