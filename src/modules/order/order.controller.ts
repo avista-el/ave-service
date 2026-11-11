@@ -15,7 +15,7 @@ import {
   Req,
   UseGuards,
 } from "@nestjs/common";
-import { Throttle, ThrottlerGuard } from "@nestjs/throttler";
+import { Throttle } from "@nestjs/throttler";
 import type { Request } from "express";
 import {
   ApiBearerAuth,
@@ -233,7 +233,6 @@ export class OrderController {
 
   @Post("track")
   @HttpCode(HttpStatus.OK)
-  @UseGuards(ThrottlerGuard)
   @Throttle({ default: { limit: 5, ttl: 60_000 } })
   @ApiOperation({
     summary: "Request order tracking link",
@@ -278,7 +277,6 @@ export class OrderController {
   @UseGuards(OptionalJwtAuthGuard)
   @Post(":orderNumber/retry-payment")
   @HttpCode(HttpStatus.OK)
-  @UseGuards(ThrottlerGuard)
   @Throttle({ default: { limit: 10, ttl: 60_000 } })
   @ApiOperation({
     summary: "Retry payment for a pending order",

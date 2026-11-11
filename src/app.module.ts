@@ -3,6 +3,8 @@ import { ConfigModule, ConfigService } from "@nestjs/config";
 import { MongooseModule } from "@nestjs/mongoose";
 import { ScheduleModule } from "@nestjs/schedule";
 import { BullModule } from "@nestjs/bull";
+import { ThrottlerModule, ThrottlerGuard } from "@nestjs/throttler";
+import { APP_GUARD } from "@nestjs/core";
 import configuration from "./config/configuration";
 
 import { JobsModule } from "./modules/jobs/jobs.module";
@@ -96,6 +98,10 @@ import { InstallmentModule } from "./modules/installment/installment.module";
     // ── Scheduler ────────────────────────────────────────────────────────────
     ScheduleModule.forRoot(),
 
+    // ── Throttler ────────────────────────────────────────────────────────────
+    // Global rate-limit defaults. Individual routes can override with @Throttle().
+    ThrottlerModule.forRoot([{ ttl: 60_000, limit: 60 }]),
+
     // ── Feature modules ───────────────────────────────────────────────────────
     AuthModule,
     CatalogModule,
@@ -114,6 +120,11 @@ import { InstallmentModule } from "./modules/installment/installment.module";
     HeroBannersModule,
     InstallmentModule,
     JobsModule,
+  ],
+  providers: [
+    // Apply ThrottlerGuard globally — individual routes can override limits
+    // with @Throttle() or opt out with @SkipThrottle().
+    { provide: APP_GUARD, useClass: ThrottlerGuard },
   ],
 })
 export class AppModule {}
