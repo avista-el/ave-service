@@ -2,6 +2,7 @@ import { ConflictException, Injectable, NotFoundException } from "@nestjs/common
 import { InjectModel } from "@nestjs/mongoose";
 import { Model, ClientSession } from "mongoose";
 import { Product, ProductDocument } from "../catalog/schemas/product.schema";
+import { LOW_STOCK_THRESHOLD } from "../../config/constants";
 
 export interface StockAdjustment {
   productId: string;
@@ -163,11 +164,16 @@ export class InventoryService {
       stock: product.stock,
       reserved: product.reserved,
       available,
-      stockStatus: available <= 0 ? "out_of_stock" : available <= 5 ? "low_stock" : "in_stock",
+      stockStatus:
+        available <= 0
+          ? "out_of_stock"
+          : available <= LOW_STOCK_THRESHOLD
+            ? "low_stock"
+            : "in_stock",
     };
   }
 
-  async getLowStockProducts(threshold = 5) {
+  async getLowStockProducts(threshold = LOW_STOCK_THRESHOLD) {
     return this.productModel
       .find({
         status: "active",

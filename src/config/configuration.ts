@@ -65,5 +65,8 @@ export default () => ({
     // STOREFRONT_URL may be comma-separated (e.g. "https://prod.com,https://staging.com").
     // Payment gateways need a single callback URL — always use the first one.
     baseUrl: (process.env.STOREFRONT_URL ?? "http://localhost:3000").split(",")[0]!.trim(),
+    // Business-rule thresholds — also exported as constants in config/constants.ts
+    lowStockThreshold: parseInt(process.env.LOW_STOCK_THRESHOLD ?? "5", 10),
+    freeDeliveryThreshold: parseInt(process.env.FREE_DELIVERY_THRESHOLD ?? "500000", 10),
   },
 });

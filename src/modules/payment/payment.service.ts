@@ -14,6 +14,7 @@ import { OrderService } from "../order/order.service";
 import { InventoryService } from "../inventory/inventory.service";
 import { OrderDocument } from "../order/schemas/order.schema";
 import { InstallmentService, InstallmentService as IS } from "../installment/installment.service";
+import { NotificationsService } from "../notifications/notifications.service";
 
 interface PaystackInitResponse {
   status: boolean;
@@ -23,7 +24,26 @@ interface PaystackInitResponse {
 
 interface PaystackVerifyResponse {
   status: boolean;
-  data: { status: string; reference: string; id: number };
+  data: {
+    status: string;
+    reference: string;
+    id: number;
+    amount: number; // in kobo
+    currency: string;
+    gateway_response?: string;
+  };
+}
+
+interface FlutterwaveVerifyResponse {
+  status: string;
+  data: {
+    status: string;
+    tx_ref: string;
+    id: number;
+    amount: number; // in full NGN units
+    currency: string;
+    processor_response?: string;
+  };
 }
 
 @Injectable()
@@ -36,18 +56,12 @@ export class PaymentService {
     private readonly orderService: OrderService,
     private readonly inventoryService: InventoryService,
     private readonly installmentService: InstallmentService,
+    private readonly notifications: NotificationsService,
     private readonly config: ConfigService,
   ) {}
 
-  // ─── Public dispatcher — used by OrderController ─────────────────────────
+  // ─── Initialize payment ───────────────────────────────────────────────────
 
-  /**
-   * Initialize a payment for an order. Branches on order.paymentMethod:
-   *   paystack     → full payment via Paystack
-   *   flutterwave  → full payment via Flutterwave
-   *   installment  → 40% deposit via Paystack/Flutterwave (paymentProvider on order)
-   *   pay_on_delivery → no-op (no gateway involved)
-   */
   async initializePayment(
     order: OrderDocument,
   ): Promise<{ checkoutUrl: string; reference: string } | null> {
@@ -56,13 +70,25 @@ export class PaymentService {
     const provider = order.paymentProvider;
     const isInstallment = order.paymentMethod === "installment";
 
+    let result: { checkoutUrl: string; reference: string };
+
     if (provider === "paystack") {
-      return this.initializePaystack(order, isInstallment);
+      result = await this.initializePaystack(order, isInstallment);
+    } else if (provider === "flutterwave") {
+      result = await this.initializeFlutterwave(order, isInstallment);
+    } else {
+      throw new BadRequestException("Unknown payment provider");
     }
-    if (provider === "flutterwave") {
-      return this.initializeFlutterwave(order, isInstallment);
-    }
-    throw new BadRequestException("Unknown payment provider");
+
+    // Record the INITIATED attempt now that we have the reference
+    const orderId = (order._id as unknown as Types.ObjectId).toString();
+    await this.orderService.recordInitiatedAttempt({
+      orderId,
+      reference: result.reference,
+      provider: provider as "paystack" | "flutterwave",
+    });
+
+    return result;
   }
 
   // ─── Paystack: initialize ─────────────────────────────────────────────────
@@ -78,8 +104,12 @@ export class PaymentService {
       ? Math.round(IS.computePlanFigures(order.total).depositAmount * 100)
       : Math.round(order.total * 100);
 
+    // Use the real customer email — never fall back to a placeholder
+    const email = order.customerEmail;
+    if (!email) throw new BadRequestException("Order has no customer email");
+
     const body = JSON.stringify({
-      email: order.customerEmail ?? "guest@alphavista.ng",
+      email,
       amount,
       reference: order.paymentReference,
       callback_url: `${this.config.get("storefront.baseUrl")}/checkout/confirm?ref=${order.paymentReference}`,
@@ -110,8 +140,10 @@ export class PaymentService {
   ): Promise<{ checkoutUrl: string; reference: string }> {
     const secretKey = this.config.get<string>("flutterwave.secretKey");
     const orderId = (order._id as unknown as Types.ObjectId).toString();
-
     const amount = isInstallment ? IS.computePlanFigures(order.total).depositAmount : order.total;
+
+    const email = order.customerEmail;
+    if (!email) throw new BadRequestException("Order has no customer email");
 
     const body = JSON.stringify({
       tx_ref: order.paymentReference,
@@ -119,8 +151,8 @@ export class PaymentService {
       currency: "NGN",
       redirect_url: `${this.config.get("storefront.baseUrl")}/checkout/confirm?ref=${order.paymentReference}`,
       customer: {
-        email: order.customerEmail ?? "guest@alphavista.ng",
-        name: order.customerName ?? "Guest",
+        email,
+        name: order.customerName ?? "Customer",
       },
       meta: {
         orderId,
@@ -140,7 +172,7 @@ export class PaymentService {
     return { checkoutUrl: data.data.link, reference: order.paymentReference };
   }
 
-  // ─── Instalment charge (scheduled BullMQ job) ─────────────────────────────
+  // ─── Instalment charge (BullMQ job) ──────────────────────────────────────
 
   async chargeInstallment(planId: string, installmentNumber: number): Promise<void> {
     const plan = await this.installmentService.findById(planId);
@@ -149,6 +181,11 @@ export class PaymentService {
 
     const order = await this.orderService.findById(plan.orderId.toString());
     const reference = `${order.paymentReference}-INST-${installmentNumber}`;
+    const email = order.customerEmail;
+    if (!email) {
+      this.logger.warn({ event: "installment_no_email", planId, installmentNumber });
+      return;
+    }
 
     try {
       if (plan.provider === "paystack") {
@@ -158,38 +195,28 @@ export class PaymentService {
           headers: { Authorization: `Bearer ${secretKey}`, "Content-Type": "application/json" },
           body: JSON.stringify({
             authorization_code: plan.authorizationCode,
-            email: order.customerEmail ?? "guest@alphavista.ng",
+            email,
             amount: Math.round(entry.amount * 100),
             reference,
-            metadata: {
-              purpose: "installment_payment",
-              planId,
-              installmentNumber,
-            },
+            metadata: { purpose: "installment_payment", planId, installmentNumber },
           }),
         });
-        if (!res.ok) {
-          await this.installmentService.markEntryFailed(planId, installmentNumber);
-        }
-        // Outcome confirmed via webhook — job complete
+        if (!res.ok) await this.installmentService.markEntryFailed(planId, installmentNumber);
       } else {
-        // Flutterwave charge with saved token
         const secretKey = this.config.get<string>("flutterwave.secretKey");
         const res = await fetch("https://api.flutterwave.com/v3/charges?type=token", {
           method: "POST",
           headers: { Authorization: `Bearer ${secretKey}`, "Content-Type": "application/json" },
           body: JSON.stringify({
             token: plan.authorizationCode,
-            email: order.customerEmail ?? "guest@alphavista.ng",
+            email,
             amount: entry.amount,
             currency: "NGN",
             tx_ref: reference,
             meta: { purpose: "installment_payment", planId, installmentNumber },
           }),
         });
-        if (!res.ok) {
-          await this.installmentService.markEntryFailed(planId, installmentNumber);
-        }
+        if (!res.ok) await this.installmentService.markEntryFailed(planId, installmentNumber);
       }
     } catch (err) {
       this.logger.error(
@@ -197,6 +224,211 @@ export class PaymentService {
         (err as Error).message,
       );
       await this.installmentService.markEntryFailed(planId, installmentNumber);
+    }
+  }
+
+  // ─── verifyAndProcess — shared by /verify endpoint + reconcile job ────────
+
+  /**
+   * Calls the gateway's verify API for the given reference, then runs the
+   * same success/failure handler as the inbound webhook.
+   * Uses the same WebhookEvent dedup so it is safe to call multiple times.
+   */
+  async verifyAndProcess(
+    reference: string,
+  ): Promise<{ status: string; order: OrderDocument | null }> {
+    const order = await this.orderService.findByAnyReference(reference);
+    if (!order) {
+      this.logger.warn({ event: "verify_no_order", reference });
+      return { status: "not_found", order: null };
+    }
+
+    const provider = order.paymentProvider;
+    if (!provider) return { status: "no_provider", order };
+
+    this.logger.log({ event: "verify_initiated", orderNumber: order.orderNumber, provider });
+
+    if (provider === "paystack") {
+      const result = await this.verifyPaystackFull(reference);
+      const syntheticEventId = `verify:paystack:${reference}`;
+      const existing = await this.webhookModel.findOne({ eventId: syntheticEventId }).lean();
+      if (existing) {
+        this.logger.log({ event: "verify_duplicate", syntheticEventId });
+        return { status: result.status, order };
+      }
+      if (result.status === "success") {
+        await this.handleFullPaymentSuccess({
+          orderId: (order._id as unknown as Types.ObjectId).toString(),
+          reference,
+          paidAmountNgn: result.amountNgn,
+          currency: result.currency,
+          eventId: syntheticEventId,
+          gatewayResponse: result.gatewayResponse,
+        });
+      } else if (result.status === "failed" || result.status === "abandoned") {
+        await this.handleFullPaymentFailure({
+          reference,
+          rawReason: result.gatewayResponse,
+        });
+      }
+      await this.webhookModel.create({
+        provider: "paystack",
+        eventId: syntheticEventId,
+        type: `verify:${result.status}`,
+        payload: { reference, result } as unknown as Record<string, unknown>,
+        orderId: null,
+        processedAt: new Date(),
+      });
+      return {
+        status: result.status,
+        order: await this.orderService.findByAnyReference(reference),
+      };
+    }
+
+    if (provider === "flutterwave") {
+      const result = await this.verifyFlutterwaveFull(reference);
+      const syntheticEventId = `verify:flutterwave:${reference}`;
+      const existing = await this.webhookModel.findOne({ eventId: syntheticEventId }).lean();
+      if (existing) return { status: result.status, order };
+      if (result.status === "successful") {
+        await this.handleFullPaymentSuccess({
+          orderId: (order._id as unknown as Types.ObjectId).toString(),
+          reference,
+          paidAmountNgn: result.amountNgn,
+          currency: result.currency,
+          eventId: syntheticEventId,
+          gatewayResponse: result.gatewayResponse,
+        });
+      } else if (result.status === "failed") {
+        await this.handleFullPaymentFailure({ reference, rawReason: result.gatewayResponse });
+      }
+      await this.webhookModel.create({
+        provider: "flutterwave",
+        eventId: syntheticEventId,
+        type: `verify:${result.status}`,
+        payload: { reference, result } as unknown as Record<string, unknown>,
+        orderId: null,
+        processedAt: new Date(),
+      });
+      return {
+        status: result.status,
+        order: await this.orderService.findByAnyReference(reference),
+      };
+    }
+
+    return { status: "unsupported_provider", order };
+  }
+
+  // ─── Shared success handler ───────────────────────────────────────────────
+
+  private async handleFullPaymentSuccess(opts: {
+    orderId: string;
+    reference: string;
+    paidAmountNgn: number;
+    currency: string;
+    eventId: string;
+    gatewayResponse?: string;
+  }): Promise<void> {
+    const order = await this.orderService.findById(opts.orderId);
+    const terminalStatuses = [
+      "paid",
+      "fulfilled",
+      "refunded",
+      "refund_required",
+      "in_installments",
+    ];
+
+    if (terminalStatuses.includes(order.status)) {
+      this.logger.log({
+        event: "success_already_terminal",
+        orderNumber: order.orderNumber,
+        status: order.status,
+      });
+      return;
+    }
+
+    // Late payment — stock was already released
+    const lateStatuses = ["failed", "abandoned", "cancelled"];
+    if (lateStatuses.includes(order.status)) {
+      const { reserved, order: updated } = await this.orderService.handleLatePayment({
+        orderId: opts.orderId,
+        webhookId: opts.eventId,
+        paidAmountNgn: opts.paidAmountNgn,
+        currency: opts.currency,
+        reference: opts.reference,
+      });
+
+      if (!reserved) {
+        // Stock unavailable — customer needs a refund
+        await this.notifications.sendRefundRequired(updated);
+      } else {
+        // Successfully recovered — send confirmation
+        const rawToken = updated.customerId
+          ? undefined
+          : await this.orderService.issueAccessToken(opts.orderId);
+        await this.notifications.sendOrderConfirmation(updated, rawToken);
+      }
+      return;
+    }
+
+    // Normal path — pending_payment
+    const { mismatch, order: resultOrder } = await this.orderService.markPaidWithAmountCheck({
+      orderId: opts.orderId,
+      webhookId: opts.eventId,
+      paidAmountNgn: opts.paidAmountNgn,
+      currency: opts.currency,
+      reference: opts.reference,
+    });
+
+    if (mismatch) {
+      this.logger.warn({ event: "amount_mismatch_flagged", orderNumber: resultOrder.orderNumber });
+      return; // Admin will review — no email
+    }
+
+    // Commit stock and notify
+    for (const item of resultOrder.items) {
+      await this.inventoryService.commitReservedStock(item.productId, item.qty);
+    }
+
+    const rawToken = resultOrder.customerId
+      ? undefined
+      : await this.orderService.issueAccessToken(opts.orderId);
+    await this.notifications.sendOrderConfirmation(resultOrder, rawToken);
+  }
+
+  // ─── Shared failure handler ───────────────────────────────────────────────
+
+  private async handleFullPaymentFailure(opts: {
+    reference: string;
+    rawReason?: string;
+  }): Promise<void> {
+    const updated = await this.orderService.markFailedAttempt({
+      reference: opts.reference,
+      rawFailureReason: opts.rawReason,
+    });
+    if (!updated) return;
+
+    // Only send the failed-payment email while the hold window is still open
+    const now = new Date();
+    const holdStillActive =
+      updated.reservationExpiresAt !== null && updated.reservationExpiresAt > now;
+
+    if (holdStillActive) {
+      const failureCode =
+        updated.paymentAttempts
+          .slice()
+          .reverse()
+          .find((a) => a.reference === opts.reference)?.failureCode ?? "UNKNOWN";
+
+      const rawToken = updated.customerId
+        ? undefined
+        : await this.orderService.issueAccessToken(
+            (updated._id as unknown as Types.ObjectId).toString(),
+          );
+
+      if (rawToken !== undefined || updated.customerId) {
+        await this.notifications.sendPaymentFailed(updated, rawToken ?? "", failureCode);
+      }
     }
   }
 
@@ -216,6 +448,9 @@ export class PaymentService {
         id: number;
         reference: string;
         status: string;
+        amount: number; // kobo
+        currency: string;
+        gateway_response?: string;
         metadata?: {
           purpose?: string;
           orderId?: string;
@@ -227,33 +462,28 @@ export class PaymentService {
     };
 
     const eventId = `paystack:${event.data.id}`;
-    const existing = await this.webhookModel.findOne({ eventId }).lean();
-    if (existing) {
-      this.logger.log(`Duplicate Paystack webhook ${eventId} — skipping`);
-      return;
+
+    // Atomic claim — the unique index on eventId ensures only one concurrent
+    // webhook with this eventId proceeds. Any duplicate (retry or race) hits
+    // the duplicate-key error and is silently skipped.
+    try {
+      await this.webhookModel.create({
+        provider: "paystack",
+        eventId,
+        type: event.event,
+        payload: event as unknown as Record<string, unknown>,
+        orderId: null,
+        processedAt: new Date(),
+      });
+    } catch (err: unknown) {
+      const code = (err as { code?: number })?.code;
+      if (code === 11000) {
+        this.logger.log(`Duplicate Paystack webhook ${eventId} — skipping`);
+        return;
+      }
+      throw err;
     }
 
-    await this.processPaystackEvent(event, eventId);
-  }
-
-  private async processPaystackEvent(
-    event: {
-      event: string;
-      data: {
-        id: number;
-        reference: string;
-        status: string;
-        metadata?: {
-          purpose?: string;
-          orderId?: string;
-          planId?: string;
-          installmentNumber?: number;
-        };
-        authorization?: { authorization_code?: string };
-      };
-    },
-    eventId: string,
-  ): Promise<void> {
     const purpose = event.data.metadata?.purpose ?? "full_payment";
 
     try {
@@ -275,16 +505,16 @@ export class PaymentService {
             });
           }
         } else {
-          // Full payment — existing logic
-          const order = await this.orderService.findByReference(event.data.reference);
+          const order = await this.orderService.findByAnyReference(event.data.reference);
           if (order) {
-            await this.orderService.markPaid(
-              (order._id as unknown as Types.ObjectId).toString(),
+            await this.handleFullPaymentSuccess({
+              orderId: (order._id as unknown as Types.ObjectId).toString(),
+              reference: event.data.reference,
+              paidAmountNgn: event.data.amount / 100, // kobo → NGN
+              currency: event.data.currency,
               eventId,
-            );
-            for (const item of order.items) {
-              await this.inventoryService.commitReservedStock(item.productId, item.qty);
-            }
+              gatewayResponse: event.data.gateway_response,
+            });
           }
         }
       } else if (event.event === "charge.failed" || event.event === "transfer.failed") {
@@ -294,23 +524,14 @@ export class PaymentService {
             await this.installmentService.markEntryFailed(planId, installmentNumber);
           }
         } else {
-          const order = await this.orderService.findByReference(event.data.reference);
-          if (order) {
-            await this.orderService.markFailed((order._id as unknown as Types.ObjectId).toString());
-          }
+          await this.handleFullPaymentFailure({
+            reference: event.data.reference,
+            rawReason: event.data.gateway_response,
+          });
         }
       }
-
-      await this.webhookModel.create({
-        provider: "paystack",
-        eventId,
-        type: event.event,
-        payload: event as unknown as Record<string, unknown>,
-        orderId: null,
-        processedAt: new Date(),
-      });
     } catch (err) {
-      this.logger.error(`Error processing webhook ${eventId}`, err);
+      this.logger.error(`Error processing Paystack webhook ${eventId}`, (err as Error).message);
       throw err;
     }
   }
@@ -331,6 +552,9 @@ export class PaymentService {
         id: number;
         tx_ref: string;
         status: string;
+        amount: number; // full NGN
+        currency: string;
+        processor_response?: string;
         meta?: { purpose?: string; orderId?: string; planId?: string; installmentNumber?: number };
         card?: { token?: string };
       };
@@ -363,15 +587,16 @@ export class PaymentService {
           });
         }
       } else {
-        const order = await this.orderService.findByReference(event.data.tx_ref);
+        const order = await this.orderService.findByAnyReference(event.data.tx_ref);
         if (order) {
-          await this.orderService.markPaid(
-            (order._id as unknown as Types.ObjectId).toString(),
+          await this.handleFullPaymentSuccess({
+            orderId: (order._id as unknown as Types.ObjectId).toString(),
+            reference: event.data.tx_ref,
+            paidAmountNgn: event.data.amount, // already in NGN
+            currency: event.data.currency,
             eventId,
-          );
-          for (const item of order.items) {
-            await this.inventoryService.commitReservedStock(item.productId, item.qty);
-          }
+            gatewayResponse: event.data.processor_response,
+          });
         }
       }
     } else if (
@@ -385,10 +610,10 @@ export class PaymentService {
           await this.installmentService.markEntryFailed(planId, installmentNumber);
         }
       } else {
-        const order = await this.orderService.findByReference(event.data.tx_ref);
-        if (order) {
-          await this.orderService.markFailed((order._id as unknown as Types.ObjectId).toString());
-        }
+        await this.handleFullPaymentFailure({
+          reference: event.data.tx_ref,
+          rawReason: event.data.processor_response,
+        });
       }
     }
 
@@ -402,7 +627,7 @@ export class PaymentService {
     });
   }
 
-  // ─── Shared: handle deposit confirmation ─────────────────────────────────
+  // ─── Installment deposit ──────────────────────────────────────────────────
 
   private async handleInstallmentDeposit(opts: {
     reference: string;
@@ -418,15 +643,12 @@ export class PaymentService {
 
     const orderId = (order._id as unknown as Types.ObjectId).toString();
 
-    // Commit stock — it's now spoken for
     for (const item of order.items) {
       await this.inventoryService.commitReservedStock(item.productId, item.qty);
     }
 
-    // Transition order to in_installments
     await this.orderService.markInInstallments(orderId);
 
-    // Create the instalment plan with the 3-month schedule
     await this.installmentService.createPlan({
       orderId,
       customerId: order.customerId ?? "",
@@ -435,19 +657,62 @@ export class PaymentService {
       provider: opts.provider,
     });
 
-    this.logger.log(`Installment deposit confirmed for order ${order.orderNumber}`);
+    // Confirmation email with order link
+    const rawToken = order.customerId
+      ? undefined
+      : await this.orderService.issueAccessToken(orderId);
+    await this.notifications.sendOrderConfirmation(order, rawToken);
+
+    this.logger.log({ event: "installment_deposit_confirmed", orderNumber: order.orderNumber });
   }
 
-  // ─── Active verification ──────────────────────────────────────────────────
+  // ─── Gateway verify helpers ───────────────────────────────────────────────
 
-  async verifyPaystackTransaction(reference: string): Promise<string> {
+  async verifyPaystackFull(reference: string): Promise<{
+    status: string;
+    amountNgn: number;
+    currency: string;
+    gatewayResponse?: string;
+  }> {
     const secretKey = this.config.get<string>("paystack.secretKey");
     const res = await fetch(
       `https://api.paystack.co/transaction/verify/${encodeURIComponent(reference)}`,
       { headers: { Authorization: `Bearer ${secretKey}` } },
     );
-    if (!res.ok) return "unknown";
+    if (!res.ok) return { status: "unknown", amountNgn: 0, currency: "NGN" };
     const data = (await res.json()) as PaystackVerifyResponse;
-    return data.data?.status ?? "unknown";
+    return {
+      status: data.data?.status ?? "unknown",
+      amountNgn: (data.data?.amount ?? 0) / 100, // kobo → NGN
+      currency: data.data?.currency ?? "NGN",
+      gatewayResponse: data.data?.gateway_response,
+    };
+  }
+
+  /** @deprecated Use verifyPaystackFull */
+  async verifyPaystackTransaction(reference: string): Promise<string> {
+    const result = await this.verifyPaystackFull(reference);
+    return result.status;
+  }
+
+  async verifyFlutterwaveFull(reference: string): Promise<{
+    status: string;
+    amountNgn: number;
+    currency: string;
+    gatewayResponse?: string;
+  }> {
+    const secretKey = this.config.get<string>("flutterwave.secretKey");
+    const res = await fetch(
+      `https://api.flutterwave.com/v3/transactions/verify_by_reference?tx_ref=${encodeURIComponent(reference)}`,
+      { headers: { Authorization: `Bearer ${secretKey}` } },
+    );
+    if (!res.ok) return { status: "unknown", amountNgn: 0, currency: "NGN" };
+    const data = (await res.json()) as FlutterwaveVerifyResponse;
+    return {
+      status: data.data?.status ?? "unknown",
+      amountNgn: data.data?.amount ?? 0,
+      currency: data.data?.currency ?? "NGN",
+      gatewayResponse: data.data?.processor_response,
+    };
   }
 }

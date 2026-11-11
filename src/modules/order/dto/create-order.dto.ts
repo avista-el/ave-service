@@ -1,4 +1,12 @@
-import { IsEnum, IsEmail, IsNotEmpty, IsOptional, IsString, ValidateNested } from "class-validator";
+import {
+  IsEnum,
+  IsEmail,
+  IsNotEmpty,
+  IsOptional,
+  IsString,
+  ValidateIf,
+  ValidateNested,
+} from "class-validator";
 import { Type } from "class-transformer";
 import { ApiProperty, ApiPropertyOptional } from "@nestjs/swagger";
 import { PaymentMethod } from "../schemas/order.schema";
@@ -28,15 +36,36 @@ export class CreateOrderDto {
   @ApiPropertyOptional({
     example: "f47ac10b-58cc-4372-a567-0e02b2c3d479",
     description:
-      "Guest ID from X-Guest-Id header — used to locate the guest cart when cartId is absent and the user is not logged in",
+      "Guest ID from X-Guest-Id header — used to locate the guest cart when cartId is absent " +
+      "and the user is not logged in",
   })
   @IsOptional()
   @IsString()
   guestId?: string;
 
-  @ApiPropertyOptional({ example: "adaeze@example.com" })
-  @IsOptional()
-  @IsEmail()
+  /**
+   * Required for guest (unauthenticated) orders.
+   * Logged-in users may omit it — the service uses their account email.
+   *
+   * The @ValidateIf decorator checks whether a JWT user is NOT present by
+   * inspecting the `_isAuthenticated` flag that the controller sets before
+   * validation.  When set to true the field is optional; otherwise it is
+   * required.
+   *
+   * Because class-validator runs before the controller body executes, we use
+   * a secondary approach: the field is always @IsEmail when provided, AND the
+   * service layer re-checks for guest orders.  This keeps the DTO simple while
+   * still surfacing a 400 at the DTO stage for obviously missing values.
+   */
+  @ApiPropertyOptional({
+    example: "adaeze@example.com",
+    description:
+      "Required for guest (unauthenticated) orders. " +
+      "Authenticated users inherit the email from their account profile.",
+  })
+  @ValidateIf((dto: CreateOrderDto) => !dto._isAuthenticated)
+  @IsNotEmpty({ message: "customerEmail is required for guest orders" })
+  @IsEmail({}, { message: "customerEmail must be a valid email address" })
   customerEmail?: string;
 
   @ApiPropertyOptional({ example: "Adaeze Okonkwo" })
@@ -50,7 +79,8 @@ export class CreateOrderDto {
     description:
       "Payment method. 'paystack' and 'flutterwave' redirect to a hosted payment page. " +
       "'pay_on_delivery' skips gateway — order goes straight to awaiting_delivery_payment. " +
-      "'installment' charges a 40% deposit via gateway and creates an InstallmentPlan.",
+      "'installment' charges a 40% deposit via gateway and creates an InstallmentPlan. " +
+      "NOTE: 'installment' is not available to guest (unauthenticated) users.",
   })
   @IsEnum(["paystack", "flutterwave", "pay_on_delivery", "installment"])
   paymentMethod: PaymentMethod;
@@ -64,4 +94,12 @@ export class CreateOrderDto {
   @IsOptional()
   @IsString()
   promoCode?: string;
+
+  /**
+   * Internal flag injected by the controller before class-validator runs.
+   * Set to `true` when a JWT user is present so `customerEmail` becomes optional.
+   * Never sent by the client — stripped by ValidationPipe's `whitelist: true`.
+   */
+  @IsOptional()
+  _isAuthenticated?: boolean;
 }

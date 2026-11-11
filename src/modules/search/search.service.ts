@@ -4,6 +4,11 @@ import { InjectModel } from "@nestjs/mongoose";
 import { FilterQuery, Model, Types } from "mongoose";
 import { MeiliSearch } from "meilisearch";
 import { Product, ProductDocument } from "../catalog/schemas/product.schema";
+import {
+  PriceResolutionService,
+  type ResolvableProduct,
+} from "../promotions/price-resolution.service";
+import { LOW_STOCK_THRESHOLD } from "../../config/constants";
 
 const INDEX_NAME = "products";
 
@@ -33,6 +38,7 @@ export class SearchService implements OnModuleInit {
   constructor(
     @InjectModel(Product.name)
     private readonly productModel: Model<ProductDocument>,
+    private readonly priceResolution: PriceResolutionService,
     private readonly config: ConfigService,
   ) {
     const host = this.config.get<string>("meilisearch.host", "http://localhost:7700");
@@ -182,7 +188,11 @@ export class SearchService implements OnModuleInit {
       try {
         const result = await this.meiliSearch(query, page, limit);
         // If Meilisearch returned hits, use them
-        if (result.items.length > 0 || !query.q) return result;
+        if (result.items.length > 0 || !query.q) {
+          // Resolve effective prices for all hits in a single batch call
+          result.items = await this.resolvePrices(result.items);
+          return result;
+        }
         // Zero hits with a query term → try MongoDB in case the index is stale
         this.logger.debug(`Meilisearch returned 0 hits for "${query.q}" — trying MongoDB fallback`);
       } catch (err) {
@@ -193,7 +203,10 @@ export class SearchService implements OnModuleInit {
       }
     }
 
-    return this.mongoSearch(query, page, limit);
+    const result = await this.mongoSearch(query, page, limit);
+    // Resolve effective prices for all hits in a single batch call
+    result.items = await this.resolvePrices(result.items);
+    return result;
   }
 
   // ─── Autosuggest ─────────────────────────────────────────────────────────
@@ -356,7 +369,8 @@ export class SearchService implements OnModuleInit {
 
   private toIndexDoc(p: ProductDocument) {
     const available = (p.stock ?? 0) - (p.reserved ?? 0);
-    const stockStatus = available <= 0 ? "out_of_stock" : available <= 5 ? "low_stock" : "in_stock";
+    const stockStatus =
+      available <= 0 ? "out_of_stock" : available <= LOW_STOCK_THRESHOLD ? "low_stock" : "in_stock";
 
     return {
       id: (p._id as unknown as Types.ObjectId).toString(),
@@ -379,6 +393,81 @@ export class SearchService implements OnModuleInit {
       stockStatus,
       description: p.description?.slice(0, 500) ?? "",
     };
+  }
+
+  // ─── Batch price resolution (called after results are fetched) ──────────
+
+  /**
+   * Resolves effectivePrice and autoAppliedDiscount for all search results
+   * using a SINGLE PriceResolutionService.resolveEffectivePriceBatch call.
+   *
+   * The search index (Meilisearch) and the Mongo fallback both store the
+   * raw base `price` — never the effective (discounted) price. Discounts are
+   * resolved at read time so they stay live without re-indexing.
+   *
+   * LIMITATION: price filters (min/max) and price sorting (price_asc/desc)
+   * operate on the base price, not the effective price. This means a product
+   * priced at ₦100,000 with a 20% auto-apply discount (effective ₦80,000) will
+   * still be filtered/sorted as ₦100,000 in search. This is acceptable because
+   * auto-apply campaigns change frequently and re-indexing on every change
+   * would be expensive. The product page and cart always show the resolved
+   * effective price.
+   */
+  private async resolvePrices<
+    T extends {
+      id: string;
+      priceBase: number;
+      effectivePrice: number;
+      autoAppliedDiscount: unknown;
+    },
+  >(items: T[]): Promise<T[]> {
+    if (items.length === 0) return items;
+
+    // 1. Collect product IDs from the search hits
+    const ids = items.map((i) => i.id);
+
+    // 2. Load pricing-relevant fields in a single query
+    const products = await this.productModel
+      .find({ _id: { $in: ids.map((id) => new Types.ObjectId(id)) } })
+      .select("price categorySlug subcategorySlug")
+      .lean<
+        {
+          _id: Types.ObjectId;
+          price: number;
+          categorySlug: string;
+          subcategorySlug: string | null;
+        }[]
+      >();
+
+    // 3. Build the ResolvableProduct array for batch resolution
+    const resolvables: ResolvableProduct[] = products.map((p) => ({
+      _id: p._id,
+      price: p.price,
+      categorySlug: p.categorySlug,
+      subcategorySlug: p.subcategorySlug ?? undefined,
+    }));
+
+    // 4. Resolve all prices in a single batch call (one DB query for campaigns)
+    const resolved = await this.priceResolution.resolveEffectivePriceBatch(resolvables);
+
+    // 5. Patch each item with the resolved effectivePrice and autoAppliedDiscount
+    for (const item of items) {
+      const r = resolved.get(item.id);
+      if (r) {
+        item.effectivePrice = r.effectivePrice;
+        (item as Record<string, unknown>)["autoAppliedDiscount"] = r.appliedCampaign
+          ? {
+              campaignId: r.appliedCampaign.campaignId,
+              code: r.appliedCampaign.code,
+              type: r.appliedCampaign.type,
+              value: r.appliedCampaign.value,
+              source: r.appliedCampaign.source,
+            }
+          : null;
+      }
+    }
+
+    return items;
   }
 
   /**
@@ -415,9 +504,8 @@ export class SearchService implements OnModuleInit {
         : undefined,
       priceBase: (hit["price"] as number | undefined) ?? 0,
       compareAtPrice: (hit["compareAtPrice"] as number | null | undefined) ?? undefined,
-      // Search hits have no auto-apply resolution — effectivePrice equals priceBase.
-      // The storefront will show the price as-is; auto-apply badges only appear
-      // on the catalog and product detail pages which go through CatalogService.
+      // Default: effectivePrice = priceBase. The caller (search method) patches
+      // this field via resolvePrices() after batch auto-apply resolution.
       effectivePrice: (hit["price"] as number | undefined) ?? 0,
       autoAppliedDiscount: null,
       images: (hit["images"] as string[] | undefined) ?? [],

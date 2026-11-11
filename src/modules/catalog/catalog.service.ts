@@ -3,6 +3,7 @@ import { InjectModel } from "@nestjs/mongoose";
 import { Model, FilterQuery, SortOrder, Types } from "mongoose";
 import slugify from "slugify";
 import { Product, ProductDocument, ProductTag } from "./schemas/product.schema";
+import { LOW_STOCK_THRESHOLD } from "../../config/constants";
 import { Brand, BrandDocument } from "./schemas/brand.schema";
 import { Category, CategoryDocument } from "./schemas/category.schema";
 import { CreateProductDto } from "./dto/create-product.dto";
@@ -351,7 +352,7 @@ export class CatalogService {
 
   computeStockStatus(available: number): "in_stock" | "low_stock" | "out_of_stock" | "preorder" {
     if (available <= 0) return "out_of_stock";
-    if (available <= 5) return "low_stock";
+    if (available <= LOW_STOCK_THRESHOLD) return "low_stock";
     return "in_stock";
   }
 }
